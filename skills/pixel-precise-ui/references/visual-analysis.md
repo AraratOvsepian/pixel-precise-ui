@@ -27,12 +27,14 @@ List every material image, logo, icon, texture, and font before coding.
 Statuses are `exact`, `derived-deterministically`, `approximate`, and `missing`.
 
 - Reuse an exact authoritative asset and verify crop, transparency, intrinsic size, and color.
+- For isolated marks, inspect alpha plus corner and edge pixels. Record whether the crop contains surrounding-surface pixels and add a padded context comparison crossing the asset boundary.
 - Keep text semantic HTML.
 - Use CSS for ordinary geometry and surfaces.
 - Use the product icon system or a precise SVG for interface icons.
 - Never approximate a brand mark in strict mode.
 - Use raster/vector assets for genuinely complex imagery.
 - Treat occluded pixels in a flattened composite as unavailable, not inferable facts.
+- Reject background candidates that retain baked foreground text, control silhouettes, button gradients, shadows, or glows. Blur does not turn a contaminated screenshot crop into a clean plate.
 
 ## 3. Element inventory
 
@@ -91,17 +93,34 @@ Create a JSON manifest consumed by `scripts/visual_diff.py`:
 {
   "regions": [
     {
-      "name": "form",
-      "bounds": [570, 405, 532, 324],
+      "name": "email-glass-surface",
+      "bounds": [579, 443, 515, 66],
       "protected": true,
       "max_normalized_mean_absolute_difference": 0.02,
-      "max_percent_pixels_over_threshold": 5.0
+      "max_edge_normalized_mean_absolute_difference": 0.02
+    },
+    {
+      "name": "logo",
+      "bounds": [775, 108, 122, 99],
+      "protected": true,
+      "max_normalized_mean_absolute_difference": 0.01,
+      "context_padding": 16,
+      "max_context_normalized_mean_absolute_difference": 0.01
     }
   ]
 }
 ```
 
-Use `[x, y, width, height]`. Protect every visually important region. Configure thresholds for the fixed capture environment; do not weaken them merely to pass the current render.
+Use `[x, y, width, height]`. Protect every visually important region and each repeated dimensional control separately. Use `context_padding` for isolated assets and the edge gate for glass, bevels, rims, inset highlights, and other high-frequency material structure. Every protected region in strict mode needs an absolute gate; regression-only regions are insufficient. Configure thresholds for the fixed capture environment; do not weaken them merely to pass the current render.
+
+### Material stack worksheet
+
+For each visibly dimensional surface, record:
+
+| Surface | Transmitted backdrop | Body/fill | Rim | Specular | Inset depth | Contact shadow/glow | Implementation evidence |
+|---|---|---|---|---|---|---|---|
+
+Verify the implemented layer stack with computed styles and DOM structure. If the reference visibly transmits or refracts its backdrop, record the actual `backdrop-filter` or equivalent exact-layer mechanism. A flat fill plus one border is a structural mismatch even when the control's bounds and average color are close.
 
 ## 7. Comparison order
 
@@ -131,11 +150,12 @@ python3 scripts/visual_diff.py source.png rendered.png \
   --regions regions.json \
   --baseline previous.png \
   --fail-on-regression \
+  --require-region-gates \
   --require-dimensions \
   --output-dir visual-check
 ```
 
-The script writes overlay, heatmap, global metrics, regional metrics, regression deltas, and gate violations. It never resizes either input.
+The script writes overlay, heatmap, global metrics, regional metrics, context overlays, edge-detail metrics, regression deltas, and gate violations. It never resizes either input.
 
 ## 10. Responsive inference
 

@@ -35,6 +35,35 @@ Allowed statuses:
 
 In strict mode, a materially visible `approximate` or `missing` asset prevents `achieved`. Do not use image generation to conceal the blocker. A composite screenshot cannot disclose background or texture pixels hidden by foreground content.
 
+### Asset-isolation gate
+
+For every isolated logo, icon, badge, or cutout:
+
+- inspect the candidate's alpha channel, edge pixels, and corner pixels;
+- reject an opaque screenshot crop whose backing surface is baked into the asset unless that backing is intentionally part of the authoritative asset;
+- do not label a context-contaminated crop `exact`, even when its core pixels are a lossless crop;
+- register both the core bounds and a padded context region that crosses every asset boundary;
+- require the context gate to pass and inspect its normal-size overlay for seams.
+
+A `0.00000` core score is not evidence of correct integration when the surrounding context was excluded.
+
+### Material-fidelity gate
+
+When the reference visibly shows glass, metal, embossing, translucency, refraction, or another dimensional material, decompose the surface before implementation:
+
+| Layer | Evidence to record |
+|---|---|
+| transmitted backdrop | visible refraction, blur, magnification, or color shift |
+| body/fill | gradient direction, opacity, tint, and texture |
+| rim | outer silhouette, bright/dark edge balance, and corner behavior |
+| specular highlight | position, falloff, and intensity |
+| inset depth | internal shadow/highlight and apparent thickness |
+| contact shadow/glow | offset, spread, and interaction with the surrounding surface |
+
+Inspect the implemented computed styles and layer structure. If the reference demonstrates transmitted background or multi-layer depth, a flat alpha fill with one border and no equivalent material layers cannot be accepted merely because its large-region average color is close. Protect each repeated material-bearing control separately rather than allowing a whole form region to dilute the mismatch.
+
+Do not use a screenshot-derived background plate that retains blurred control silhouettes, labels, button gradients, or their foreground shadows/glows behind the live components. Such a plate is background-contaminated and invalid for strict acceptance.
+
 ### Typography gate
 
 Verify both declared and computed styles for each text role:
@@ -76,13 +105,24 @@ Create a JSON file for the important visual regions:
       "name": "logo",
       "bounds": [775, 108, 122, 99],
       "protected": true,
-      "max_normalized_mean_absolute_difference": 0.02
+      "max_normalized_mean_absolute_difference": 0.02,
+      "context_padding": 16,
+      "max_context_normalized_mean_absolute_difference": 0.02
+    },
+    {
+      "name": "email-glass-surface",
+      "bounds": [579, 443, 515, 66],
+      "protected": true,
+      "max_normalized_mean_absolute_difference": 0.02,
+      "max_edge_normalized_mean_absolute_difference": 0.02
     }
   ]
 }
 ```
 
-`bounds` are `[x, y, width, height]` in source pixels. Choose tolerances for the fixed environment and source type rather than treating the example values as universal. Brand marks, text, and controls normally require tighter gates than photographic texture.
+`bounds` are `[x, y, width, height]` in source pixels. `context_padding` is either one positive integer or `[left, top, right, bottom]`; it expands the comparison across an asset boundary. The edge metric compares high-frequency structure and exposes missing rims, bevels, inset highlights, and similar material detail. Choose tolerances for the fixed environment and source type rather than treating the example values as universal. Brand marks, text, and controls normally require tighter gates than photographic texture.
+
+Run strict manifests with `--require-region-gates`. Every protected region must have at least one absolute gate. A baseline-only comparison answers “did it get worse?” but not “is it good enough?” A region with `context_padding` must also define `max_context_normalized_mean_absolute_difference`.
 
 Do not omit a visibly important region merely because it scores poorly.
 
@@ -101,6 +141,7 @@ Rules:
 4. Reject and revert if the intended region does not improve.
 5. Reject and revert if a protected region regresses beyond the manifest or command tolerance.
 6. Inspect the overlay at normal size even when metrics pass.
+7. Reject any visible rectangular seam, halo discontinuity, baked control ghost, or flattened material cue regardless of a passing core or global score.
 
 Avoid compensating transforms that align one landmark while leaving the underlying font, intrinsic dimensions, or flow incorrect.
 
@@ -111,6 +152,8 @@ Avoid compensating transforms that align one landmark while leaving the underlyi
 - capture is stable and correctly registered;
 - authoritative/deterministic assets cover all material pixels;
 - protected regional gates pass;
+- isolated assets pass their padded context gates without visible seams;
+- dimensional surfaces pass individual color and edge-detail gates and reproduce the evidenced material stack;
 - structural landmarks and wrapping match;
 - overlay is visually indistinguishable at normal size.
 

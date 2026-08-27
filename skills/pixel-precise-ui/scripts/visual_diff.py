@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from PIL import Image, ImageChops, ImageOps
+    from PIL import Image, ImageChops, ImageFilter, ImageOps
 except ModuleNotFoundError:
     print(
         "visual_diff.py requires Pillow. Use an environment that already provides it "
@@ -71,6 +71,14 @@ def parse_args() -> argparse.Namespace:
         "--require-dimensions",
         action="store_true",
         help="Fail unless source, candidate, and baseline dimensions match exactly",
+    )
+    parser.add_argument(
+        "--require-region-gates",
+        action="store_true",
+        help=(
+            "Fail when a protected region has no absolute visual gate, or when a "
+            "configured context area has no context gate"
+        ),
     )
     args = parser.parse_args()
 
@@ -135,6 +143,33 @@ def compare_images(
     return metrics, difference, threshold_mask
 
 
+def edge_normalized_difference(source: Image.Image, rendered: Image.Image) -> float:
+    """Compare high-frequency structure so large flat areas cannot hide missing rims."""
+    source_edges = ImageOps.grayscale(source).filter(ImageFilter.FIND_EDGES)
+    rendered_edges = ImageOps.grayscale(rendered).filter(ImageFilter.FIND_EDGES)
+    difference = ImageChops.difference(source_edges, rendered_edges)
+    total = sum(value * count for value, count in enumerate(difference.histogram()))
+    mean = total / (source.width * source.height)
+    return round(mean / 255, 8)
+
+
+def expanded_box(
+    bounds: list[int], padding: int | list[int], canvas_size: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    if isinstance(padding, int):
+        left = top = right = bottom = padding
+    else:
+        left, top, right, bottom = padding
+    x, y, width, height = bounds
+    canvas_width, canvas_height = canvas_size
+    return (
+        max(0, x - left),
+        max(0, y - top),
+        min(canvas_width, x + width + right),
+        min(canvas_height, y + height + bottom),
+    )
+
+
 def load_regions(path: Path | None, source_size: tuple[int, int]) -> list[dict[str, Any]]:
     if path is None:
         return []
@@ -171,7 +206,11 @@ def load_regions(path: Path | None, source_size: tuple[int, int]) -> list[dict[s
             raise ValueError(
                 f"Region '{name}' extends outside source dimensions {source_size}: {bounds}"
             )
-        for key in ("max_normalized_mean_absolute_difference",):
+        for key in (
+            "max_normalized_mean_absolute_difference",
+            "max_edge_normalized_mean_absolute_difference",
+            "max_context_normalized_mean_absolute_difference",
+        ):
             value = raw.get(key)
             if value is not None and not isinstance(value, (int, float)):
                 raise ValueError(f"Region '{name}' {key} must be numeric")
@@ -183,6 +222,28 @@ def load_regions(path: Path | None, source_size: tuple[int, int]) -> list[dict[s
         ):
             raise ValueError(
                 f"Region '{name}' max_percent_pixels_over_threshold must be 0..100"
+            )
+        context_padding = raw.get("context_padding")
+        if context_padding is not None:
+            valid_integer = isinstance(context_padding, int) and context_padding > 0
+            valid_list = (
+                isinstance(context_padding, list)
+                and len(context_padding) == 4
+                and all(isinstance(item, int) and item >= 0 for item in context_padding)
+                and any(item > 0 for item in context_padding)
+            )
+            if not valid_integer and not valid_list:
+                raise ValueError(
+                    f"Region '{name}' context_padding must be a positive integer or "
+                    "[left, top, right, bottom] non-negative integers"
+                )
+        if (
+            raw.get("max_context_normalized_mean_absolute_difference") is not None
+            and context_padding is None
+        ):
+            raise ValueError(
+                f"Region '{name}' max_context_normalized_mean_absolute_difference "
+                "requires context_padding"
             )
         checked.append({**raw, "name": name, "bounds": bounds})
     return checked
@@ -284,6 +345,7 @@ def main() -> int:
         region_metrics, region_difference, _ = compare_images(
             source_crop, rendered_crop, args.threshold
         )
+        edge_difference = edge_normalized_difference(source_crop, rendered_crop)
         save_visuals(
             source_crop,
             rendered_crop,
@@ -291,18 +353,73 @@ def main() -> int:
             output_dir / "regions" / safe_name(name),
         )
 
+        context_bounds = None
+        context_metrics = None
+        context_edge_difference = None
+        context_padding = region.get("context_padding")
+        if context_padding is not None:
+            context_box = expanded_box(region["bounds"], context_padding, source_canvas.size)
+            context_bounds = [
+                context_box[0],
+                context_box[1],
+                context_box[2] - context_box[0],
+                context_box[3] - context_box[1],
+            ]
+            source_context = source_canvas.crop(context_box)
+            rendered_context = rendered_canvas.crop(context_box)
+            context_metrics, context_difference, _ = compare_images(
+                source_context, rendered_context, args.threshold
+            )
+            context_edge_difference = edge_normalized_difference(
+                source_context, rendered_context
+            )
+            save_visuals(
+                source_context,
+                rendered_context,
+                context_difference,
+                output_dir / "regions" / f"{safe_name(name)}-context",
+            )
+
         baseline_metrics = None
         regression_delta = None
+        baseline_edge_difference = None
+        edge_regression_delta = None
+        baseline_context_metrics = None
+        context_regression_delta = None
         if baseline_canvas is not None:
             baseline_crop = baseline_canvas.crop(box)
             baseline_metrics, _, _ = compare_images(
                 source_crop, baseline_crop, args.threshold
+            )
+            baseline_edge_difference = edge_normalized_difference(
+                source_crop, baseline_crop
             )
             regression_delta = round(
                 region_metrics["normalized_mean_absolute_difference"]
                 - baseline_metrics["normalized_mean_absolute_difference"],
                 8,
             )
+            edge_regression_delta = round(
+                edge_difference - baseline_edge_difference,
+                8,
+            )
+            if context_padding is not None and context_bounds is not None:
+                context_box = (
+                    context_bounds[0],
+                    context_bounds[1],
+                    context_bounds[0] + context_bounds[2],
+                    context_bounds[1] + context_bounds[3],
+                )
+                source_context = source_canvas.crop(context_box)
+                baseline_context = baseline_canvas.crop(context_box)
+                baseline_context_metrics, _, _ = compare_images(
+                    source_context, baseline_context, args.threshold
+                )
+                context_regression_delta = round(
+                    context_metrics["normalized_mean_absolute_difference"]
+                    - baseline_context_metrics["normalized_mean_absolute_difference"],
+                    8,
+                )
 
         protected = bool(region.get("protected", True))
         region_result = {
@@ -310,10 +427,50 @@ def main() -> int:
             "bounds": region["bounds"],
             "protected": protected,
             "metrics": region_metrics,
+            "edge_normalized_mean_absolute_difference": edge_difference,
+            "context_bounds": context_bounds,
+            "context_metrics": context_metrics,
+            "context_edge_normalized_mean_absolute_difference": context_edge_difference,
             "baseline_metrics": baseline_metrics,
+            "baseline_edge_normalized_mean_absolute_difference": baseline_edge_difference,
+            "baseline_context_metrics": baseline_context_metrics,
             "normalized_mad_regression": regression_delta,
+            "edge_normalized_mad_regression": edge_regression_delta,
+            "context_normalized_mad_regression": context_regression_delta,
         }
         region_results.append(region_result)
+
+        absolute_gate_keys = (
+            "max_normalized_mean_absolute_difference",
+            "max_percent_pixels_over_threshold",
+            "max_edge_normalized_mean_absolute_difference",
+            "max_context_normalized_mean_absolute_difference",
+        )
+        if (
+            args.require_region_gates
+            and protected
+            and not any(region.get(key) is not None for key in absolute_gate_keys)
+        ):
+            violations.append(
+                {
+                    "scope": name,
+                    "gate": "missing_absolute_region_gate",
+                    "message": "protected regions require at least one absolute visual gate",
+                }
+            )
+        if (
+            args.require_region_gates
+            and protected
+            and context_padding is not None
+            and region.get("max_context_normalized_mean_absolute_difference") is None
+        ):
+            violations.append(
+                {
+                    "scope": name,
+                    "gate": "missing_context_gate",
+                    "message": "context_padding requires an absolute context gate",
+                }
+            )
 
         max_nmad = region.get("max_normalized_mean_absolute_difference")
         if max_nmad is not None and (
@@ -339,6 +496,33 @@ def main() -> int:
                     "maximum": float(max_changed),
                 }
             )
+        max_edge = region.get("max_edge_normalized_mean_absolute_difference")
+        if max_edge is not None and edge_difference > float(max_edge):
+            violations.append(
+                {
+                    "scope": name,
+                    "gate": "edge_normalized_mean_absolute_difference",
+                    "actual": edge_difference,
+                    "maximum": float(max_edge),
+                }
+            )
+        max_context = region.get("max_context_normalized_mean_absolute_difference")
+        if (
+            max_context is not None
+            and context_metrics is not None
+            and context_metrics["normalized_mean_absolute_difference"]
+            > float(max_context)
+        ):
+            violations.append(
+                {
+                    "scope": name,
+                    "gate": "context_normalized_mean_absolute_difference",
+                    "actual": context_metrics[
+                        "normalized_mean_absolute_difference"
+                    ],
+                    "maximum": float(max_context),
+                }
+            )
         if (
             args.fail_on_regression
             and protected
@@ -350,6 +534,34 @@ def main() -> int:
                     "scope": name,
                     "gate": "protected_region_regression",
                     "actual": regression_delta,
+                    "maximum": args.regression_tolerance,
+                }
+            )
+        if (
+            args.fail_on_regression
+            and protected
+            and edge_regression_delta is not None
+            and edge_regression_delta > args.regression_tolerance
+        ):
+            violations.append(
+                {
+                    "scope": name,
+                    "gate": "protected_region_edge_regression",
+                    "actual": edge_regression_delta,
+                    "maximum": args.regression_tolerance,
+                }
+            )
+        if (
+            args.fail_on_regression
+            and protected
+            and context_regression_delta is not None
+            and context_regression_delta > args.regression_tolerance
+        ):
+            violations.append(
+                {
+                    "scope": name,
+                    "gate": "protected_region_context_regression",
+                    "actual": context_regression_delta,
                     "maximum": args.regression_tolerance,
                 }
             )
@@ -380,6 +592,7 @@ def main() -> int:
         "baseline_global": baseline_global_metrics,
         "regions": region_results,
         "regression_tolerance": args.regression_tolerance,
+        "require_region_gates": args.require_region_gates,
         "violations": violations,
         "passed": not violations,
         "resized_for_comparison": False,

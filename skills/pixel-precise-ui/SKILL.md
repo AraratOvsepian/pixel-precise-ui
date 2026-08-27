@@ -20,6 +20,8 @@ Never silently downgrade strict parity. If a strict run lacks an authoritative f
 - Read applicable repository instructions and preserve user-owned changes.
 - Inspect every reference at original resolution and register its probable CSS viewport, device-pixel ratio, route, and UI state.
 - Never use the complete reference screenshot as a page background, overlay, canvas, or single full-page image.
+- Do not present an opaque crop of an isolated logo or icon as exact when the crop contains pixels from the surrounding surface. Use an authoritative transparent asset, a verified mask, or treat it as blocked. Always compare a padded context around isolated assets so a perfect core score cannot hide a rectangular seam.
+- Do not build a page or component background from a screenshot crop that still contains blurred text, controls, buttons, shadows, or glows belonging to foreground UI. Background-contaminated assets are failed experiments, not clean plates.
 - Keep text semantic HTML. Use CSS for ordinary geometry and surfaces, an exact product asset or precise SVG for brand/interface marks, and raster assets only for genuinely image-based content.
 - In strict mode, do not generate, redraw, or approximate a missing logo, font, photograph, background plate, or complex texture. A flattened screenshot cannot reveal pixels hidden behind an opaque or translucent foreground; treat missing hidden pixels as a source limitation.
 - Do not submit live forms, mutate production data, or trigger external side effects for visual state.
@@ -36,7 +38,8 @@ Inspect the route, component tree, styles, resets, computed fonts, available fon
 - element inventory and semantic component tree;
 - token sheet and computed-style audit;
 - verification landmarks;
-- protected comparison regions in a JSON manifest.
+- protected comparison regions in a JSON manifest, including padded asset context and individual material-bearing controls where applicable;
+- a material-layer inventory for visibly glassy, metallic, translucent, embossed, or otherwise dimensional surfaces.
 
 In strict mode, unresolved `approximate` or `missing` assets that materially affect visible pixels block an `achieved` result. Ask for the original layered design, clean image plate, exact SVG/logo, or font file when needed.
 
@@ -78,11 +81,12 @@ python3 scripts/visual_diff.py source.png render.png \
   --regions regions.json \
   --baseline previous-render.png \
   --fail-on-regression \
+  --require-region-gates \
   --require-dimensions \
   --output-dir visual-check
 ```
 
-Change one subsystem per round. Record the hypothesis and relevant regional metrics before editing. Accept a round only when the intended region improves and no protected region exceeds its configured gate or regression tolerance. A better global score never excuses a worse logo, typography, form, or other protected region.
+Change one subsystem per round. Record the hypothesis and relevant regional metrics before editing. Give every protected region an absolute gate; a baseline-regression check alone is insufficient when the baseline is already wrong. Use context gates around isolated assets and edge-detail gates on dimensional controls. Accept a round only when the intended region improves and no protected region exceeds its configured gate or regression tolerance. A better global score never excuses a worse logo, typography, form, or other protected region.
 
 ### 5. Stop according to evidence
 
@@ -93,6 +97,8 @@ Strict parity is `achieved` only when all of the following hold in the fixed cap
 - major edges and baselines are within the registered tolerance, normally one CSS pixel;
 - text family, wrapping, and glyph positioning match;
 - every protected region passes its configured visual gates;
+- isolated assets are seamless in their padded context;
+- dimensional controls reproduce the source's material cues rather than merely matching bounds and average color;
 - normal-size overlay is visually indistinguishable;
 - no visible mismatch is explained by a generated or approximate asset.
 
