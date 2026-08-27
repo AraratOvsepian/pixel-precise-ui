@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pixel Precise UI"
+  short_description: "Recreate interfaces precisely from reference images"
+  default_prompt: "Use $pixel-precise-ui to recreate this reference image in the existing application and verify the local result visually."
