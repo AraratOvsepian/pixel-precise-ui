@@ -14,9 +14,35 @@ SCRIPT = Path(__file__).parents[1] / "scripts" / "visual_diff.py"
 
 
 class VisualDiffTests(unittest.TestCase):
-    def run_diff(self, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_diff(
+        self, root: Path, *args: str, auto_ledger: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        command_args = list(args)
+        if (
+            auto_ledger
+            and "--strict-parity" in command_args
+            and "--asset-ledger" not in command_args
+        ):
+            ledger = root / "asset-ledger.json"
+            ledger.write_text(
+                json.dumps(
+                    {
+                        "assets": [
+                            {
+                                "name": "synthetic-reference",
+                                "kind": "other",
+                                "status": "exact",
+                                "material": True,
+                                "evidence": "Test fixture generated from the same pixels.",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            command_args.extend(["--asset-ledger", str(ledger)])
         return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
+            [sys.executable, str(SCRIPT), *command_args],
             cwd=root,
             text=True,
             capture_output=True,
@@ -359,6 +385,12 @@ class VisualDiffTests(unittest.TestCase):
             metrics = json.loads((output / "metrics.json").read_text())
             self.assertTrue(metrics["passed"])
             self.assertTrue(metrics["strict_parity"])
+            self.assertEqual(metrics["classification"], "achieved")
+            self.assertEqual(metrics["exact_pixel_metrics"]["pixels_over"]["0"], 0)
+            self.assertEqual(
+                metrics["pixel_sha256"]["source"],
+                metrics["pixel_sha256"]["rendered"],
+            )
             self.assertEqual(
                 metrics["stability"]["normalized_mean_absolute_difference"], 0
             )
@@ -513,6 +545,307 @@ class VisualDiffTests(unittest.TestCase):
             gates = [violation["gate"] for violation in metrics["violations"]]
             self.assertIn("strict_normalized_mean_absolute_difference", gates)
             self.assertIn("strict_worst_tile_normalized_mean_absolute_difference", gates)
+
+    def test_strict_asset_requires_a_silhouette_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            image = Image.new("RGB", (40, 40), "#123456")
+            image.save(source)
+            image.save(rendered)
+            image.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 40, 40],
+                                "protected": True,
+                            },
+                            {
+                                "name": "logo",
+                                "kind": "asset",
+                                "bounds": [10, 10, 20, 20],
+                                "context_padding": 2,
+                                "protected": True,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertIn(
+                "strict_asset_mask",
+                [violation["gate"] for violation in metrics["violations"]],
+            )
+
+    def test_masked_asset_core_cannot_hide_a_rectangular_boundary_seam(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            mask = root / "mask.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            original = Image.new("RGB", (40, 40), "#101a24")
+            source_drawing = ImageDraw.Draw(original)
+            source_drawing.rectangle((18, 18, 21, 21), fill="white")
+            original.save(source)
+            candidate = original.copy()
+            candidate_drawing = ImageDraw.Draw(candidate)
+            candidate_drawing.rectangle((10, 10, 29, 29), fill="#253545")
+            candidate_drawing.rectangle((18, 18, 21, 21), fill="white")
+            candidate.save(rendered)
+            candidate.save(stability)
+            silhouette = Image.new("L", (20, 20), 0)
+            silhouette_drawing = ImageDraw.Draw(silhouette)
+            silhouette_drawing.rectangle((8, 8, 11, 11), fill=255)
+            silhouette.save(mask)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 40, 40],
+                                "protected": True,
+                            },
+                            {
+                                "name": "logo",
+                                "kind": "asset",
+                                "bounds": [10, 10, 20, 20],
+                                "mask": "mask.png",
+                                "context_padding": 2,
+                                "protected": True,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            logo = next(item for item in metrics["regions"] if item["name"] == "logo")
+            self.assertEqual(
+                logo["masked_metrics"]["normalized_mean_absolute_difference"], 0
+            )
+            self.assertIn(
+                "strict_asset_boundary_discontinuity",
+                [violation["gate"] for violation in metrics["violations"]],
+            )
+
+    def test_strict_parity_rejects_even_one_changed_rgb_pixel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            original = Image.new("RGB", (100, 100), "#123456")
+            original.save(source)
+            changed = original.copy()
+            changed.putpixel((50, 50), (19, 52, 86))
+            changed.save(rendered)
+            changed.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 100, 100],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertIn(
+                "strict_exact_pixel_mismatch",
+                [violation["gate"] for violation in metrics["violations"]],
+            )
+            self.assertEqual(metrics["exact_pixel_metrics"]["pixels_over"]["0"], 1)
+            self.assertEqual(metrics["classification"], "failed")
+
+    def test_strict_parity_blocks_without_asset_provenance_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            image = Image.new("RGB", (20, 20), "#123456")
+            image.save(source)
+            image.save(rendered)
+            image.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 20, 20],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+                auto_ledger=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertEqual(metrics["classification"], "blocked")
+            self.assertIn(
+                "strict_asset_ledger",
+                [violation["gate"] for violation in metrics["violations"]],
+            )
+
+    def test_unresolved_material_font_is_an_explicit_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            ledger = root / "asset-ledger.json"
+            output = root / "output"
+            image = Image.new("RGB", (30, 20), "#123456")
+            image.save(source)
+            image.save(rendered)
+            image.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 30, 20],
+                                "protected": True,
+                            },
+                            {
+                                "name": "heading",
+                                "kind": "text",
+                                "bounds": [2, 2, 20, 10],
+                                "protected": True,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ledger.write_text(
+                json.dumps(
+                    {
+                        "assets": [
+                            {
+                                "name": "unknown-font",
+                                "kind": "font",
+                                "status": "missing",
+                                "material": True,
+                                "evidence": "The flattened source does not identify a font.",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--asset-ledger",
+                str(ledger),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertEqual(metrics["classification"], "blocked")
+            gates = [violation["gate"] for violation in metrics["violations"]]
+            self.assertIn("unresolved_material_asset", gates)
+            self.assertIn("strict_font_provenance", gates)
 
 
 if __name__ == "__main__":

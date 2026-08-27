@@ -35,6 +35,31 @@ Allowed statuses:
 
 In strict mode, a materially visible `approximate` or `missing` asset prevents `achieved`. Do not use image generation to conceal the blocker. A composite screenshot cannot disclose background or texture pixels hidden by foreground content.
 
+Encode that ledger as JSON and pass it to the validator rather than leaving provenance as prose:
+
+```json
+{
+  "assets": [
+    {
+      "name": "product-logo",
+      "kind": "icon",
+      "status": "exact",
+      "material": true,
+      "evidence": "Authoritative SVG from the product repository."
+    },
+    {
+      "name": "display-typeface",
+      "kind": "font",
+      "status": "missing",
+      "material": true,
+      "evidence": "The flattened reference does not identify or include the font file."
+    }
+  ]
+}
+```
+
+Allowed `kind` values are `font`, `image`, `icon`, `texture`, and `other`. Every entry requires `name`, `kind`, `status`, `material`, and non-empty `evidence`. A material `approximate` or `missing` entry makes the machine result `blocked`, even if the rendered screenshot happens to score well. Protected text also requires an exact or deterministically derived material font entry.
+
 ### Asset-isolation gate
 
 For every isolated logo, icon, badge, or cutout:
@@ -107,6 +132,8 @@ Create a JSON file for the important visual regions:
       "kind": "asset",
       "bounds": [775, 108, 122, 99],
       "protected": true,
+      "mask": "masks/logo-alpha.png",
+      "ledger_name": "product-logo",
       "context_padding": 16
     },
     {
@@ -119,9 +146,19 @@ Create a JSON file for the important visual regions:
 }
 ```
 
-`bounds` are `[x, y, width, height]` in source pixels. Strict manifests require one protected `kind: full-page` region covering the complete source. Every protected region requires a `kind`: `full-page`, `asset`, `material`, `text`, `surface`, or `control`. Asset regions require `context_padding`; material regions automatically receive an edge-detail gate. `context_padding` is either one positive integer or `[left, top, right, bottom]` and expands the comparison across every asset boundary.
+`bounds` are `[x, y, width, height]` in source pixels. Strict manifests require one protected `kind: full-page` region covering the complete source. Every protected region requires a `kind`: `full-page`, `asset`, `material`, `text`, `surface`, or `control`. Asset regions require an alpha/silhouette `mask`, a `ledger_name`, and `context_padding`. Material masks may exclude live semantic foreground pixels so the glass/body itself is scored independently, but the excluded text/icon must have its own protected region. A mask is never permission to omit a mismatch. `context_padding` is either one positive integer or `[left, top, right, bottom]` and expands the comparison across every asset boundary.
 
-Run exact requests with `--strict-parity --stability-capture repeat.png`. The fixed profile is intentionally not configurable to be looser:
+Run exact requests with `--strict-parity --stability-capture repeat.png --asset-ledger asset-ledger.json`. Strict completion has an immutable zero-tolerance gate:
+
+| Completion gate | Required value |
+|---|---:|
+| Changed decoded RGB pixels | 0 |
+| Maximum channel difference | 0 |
+| Source/render pixel SHA-256 | identical |
+| Candidate/repeat changed pixels | 0 |
+| Material approximate or missing ledger entries | 0 |
+
+The following fixed ceilings remain useful as focused iteration diagnostics. They can explain whether a failed round is close, but they cannot override a non-zero exact-pixel count:
 
 | Gate | Fixed maximum |
 |---|---:|
@@ -132,9 +169,9 @@ Run exact requests with `--strict-parity --stability-capture repeat.png`. The fi
 | Non-full-page region normalized difference | 0.012 |
 | Non-full-page pixels over 8 | 6% |
 | Material edge-detail difference | 0.012 |
-| Asset padded-context difference | 0.012 |
+| Asset boundary-discontinuity difference | 0.012 |
 
-The output also records exact changed-pixel counts, percentages over 0/1/4/8/16/20/32, maximum channel error, p95/p99/p99.9 channel error, and the worst tile location. Manifest gates may be added only when they are stricter than the fixed profile. A baseline comparison answers “did it improve?”; only strict-profile success answers “is it complete?”
+The output records RGB pixel hashes, exact changed-pixel counts, percentages over 0/1/4/8/16/20/32, maximum channel error, p95/p99/p99.9 channel error, the worst tile location, masked material/asset scores, asset-boundary discontinuity, provenance blockers, and the final `achieved`, `failed`, or `blocked` classification. Manifest gates may be added only when they are stricter than the fixed profile. A baseline comparison answers “did it improve?”; only zero-difference strict success answers “is it exact?”
 
 Do not omit a visibly important region merely because it scores poorly.
 
@@ -164,6 +201,7 @@ Avoid compensating transforms that align one landmark while leaving the underlyi
 
 - capture is stable and correctly registered;
 - all decoded images are lossless and the repeated candidate capture is pixel-identical;
+- decoded source and render RGB hashes are identical and the exact changed-pixel count is zero;
 - authoritative/deterministic assets cover all material pixels;
 - the immutable strict profile passes, including full-page, exact-pixel distribution, worst-tile, typed-region, asset-context, and material-edge gates;
 - protected regional gates pass;

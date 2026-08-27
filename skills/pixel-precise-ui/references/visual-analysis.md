@@ -103,6 +103,8 @@ Create a JSON manifest consumed by `scripts/visual_diff.py`:
       "kind": "asset",
       "bounds": [775, 108, 122, 99],
       "protected": true,
+      "mask": "masks/logo-alpha.png",
+      "ledger_name": "product-logo",
       "context_padding": 16
     },
     {
@@ -115,7 +117,7 @@ Create a JSON manifest consumed by `scripts/visual_diff.py`:
 }
 ```
 
-Use `[x, y, width, height]`. Exact requests require a complete `full-page` region plus typed regions for every visually important element and every repeated dimensional control. Types are `full-page`, `asset`, `material`, `text`, `surface`, and `control`. Use `context_padding` for isolated assets. The strict profile automatically applies global, exact-pixel distribution, worst-tile, regional, asset-context, and material-edge gates; do not replace it with hand-selected thresholds.
+Use `[x, y, width, height]`. Exact requests require a complete `full-page` region plus typed regions for every visually important element and every repeated dimensional control. Types are `full-page`, `asset`, `material`, `text`, `surface`, and `control`. Use a silhouette mask, `ledger_name`, and `context_padding` for isolated assets. Material masks may isolate the surface only when excluded foreground content has its own protected region. The strict profile requires zero decoded RGB pixel differences, then reports global, worst-tile, regional, boundary, and material-edge diagnostics to guide failed rounds; do not replace it with hand-selected completion thresholds.
 
 ### Material stack worksheet
 
@@ -152,6 +154,7 @@ Use the previous accepted render as `--baseline`. A lower global score does not 
 ```bash
 python3 scripts/visual_diff.py source.png rendered.png \
   --regions regions.json \
+  --asset-ledger asset-ledger.json \
   --stability-capture rendered-repeat.png \
   --baseline previous.png \
   --fail-on-regression \
@@ -159,7 +162,7 @@ python3 scripts/visual_diff.py source.png rendered.png \
   --output-dir visual-check
 ```
 
-The script writes overlay, heatmap, global and regional metrics, exact changed-pixel distributions, worst-tile evidence, context overlays, edge-detail metrics, stability evidence, regression deltas, and gate violations. It never resizes either input. Strict mode rejects lossy inputs even when their filenames end in `.png`.
+The script writes RGB pixel hashes, overlay, heatmap, global and regional metrics, exact changed-pixel distributions, worst-tile evidence, masked metrics, boundary checks, edge-detail metrics, stability evidence, provenance blockers, regression deltas, and gate violations. It never resizes either input. Strict mode rejects lossy inputs even when their filenames end in `.png`.
 
 ## 10. Responsive inference
 
@@ -167,7 +170,7 @@ A reference proves only its registered viewport. Match that state first. Check s
 
 ## 11. Completion rubric
 
-- `achieved`: lossless deterministic inputs, pixel-identical repeat capture, immutable strict profile success, structural landmarks/wrapping match, and normal-size overlay is visually indistinguishable.
+- `achieved`: lossless deterministic inputs, a clear provenance ledger, pixel-identical repeat capture, identical source/render RGB hashes, zero changed pixels, structural landmarks/wrapping match, and normal-size overlay is visually indistinguishable.
 - `closely approximated`: strong result with explained visible differences and no exact-match claim.
 - `blocked`: missing authoritative asset, hidden source pixels, unresolved viewport, or unavailable deterministic capture materially prevents convergence.
 

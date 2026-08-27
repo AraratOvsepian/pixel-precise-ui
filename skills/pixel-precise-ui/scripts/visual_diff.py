@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -30,8 +31,10 @@ STRICT_GLOBAL_MAX_TILE_NMAD = 0.06
 STRICT_REGION_MAX_NMAD = 0.012
 STRICT_REGION_MAX_CHANGED_PCT = 6.0
 STRICT_EDGE_MAX_NMAD = 0.012
-STRICT_CONTEXT_MAX_NMAD = 0.012
+STRICT_ASSET_BOUNDARY_MAX_NMAD = 0.012
 STRICT_TILE_SIZE = 32
+ASSET_STATUSES = {"exact", "derived-deterministically", "approximate", "missing"}
+ASSET_KINDS = {"font", "image", "icon", "texture", "other"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,14 +101,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Apply the immutable exact-match profile: lossless inputs, exact dimensions, "
-            "a pixel-identical stability capture, a full-page protected region, typed "
-            "asset/material regions, and fixed global/regional pixel-error ceilings"
+            "a pixel-identical stability capture, zero source-to-render RGB pixel changes, "
+            "a provenance ledger, a full-page protected region, and typed diagnostic regions"
         ),
     )
     parser.add_argument(
         "--stability-capture",
         type=Path,
         help="Second unchanged capture used to prove deterministic rendering",
+    )
+    parser.add_argument(
+        "--asset-ledger",
+        type=Path,
+        help=(
+            "JSON provenance ledger for visible fonts and assets. Strict parity "
+            "requires this file and blocks unresolved material entries."
+        ),
     )
     args = parser.parse_args()
 
@@ -143,6 +154,13 @@ def image_format(path: Path) -> str | None:
         raise FileNotFoundError(f"Image not found: {path}")
     with Image.open(path) as image:
         return image.format
+
+
+def pixel_sha256(image: Image.Image) -> str:
+    digest = hashlib.sha256()
+    digest.update(f"RGB:{image.width}x{image.height}:".encode("ascii"))
+    digest.update(image.convert("RGB").tobytes())
+    return digest.hexdigest()
 
 
 def padded(image: Image.Image, size: tuple[int, int]) -> Image.Image:
@@ -220,6 +238,114 @@ def exact_pixel_metrics(source: Image.Image, rendered: Image.Image) -> dict[str,
             key: round((count / total_pixels) * 100, 6) for key, count in counts.items()
         },
     }
+
+
+def load_region_mask(
+    region: dict[str, Any], manifest_path: Path | None, expected_size: tuple[int, int]
+) -> tuple[Image.Image | None, str | None]:
+    raw_path = region.get("mask")
+    if raw_path is None:
+        return None, None
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError(f"Region '{region['name']}' mask must be a non-empty path")
+    path = Path(raw_path)
+    if not path.is_absolute():
+        if manifest_path is None:
+            raise ValueError(f"Region '{region['name']}' relative mask requires a manifest")
+        path = manifest_path.parent / path
+    if not path.is_file():
+        raise FileNotFoundError(f"Region '{region['name']}' mask not found: {path}")
+    with Image.open(path) as image:
+        if image.size != expected_size:
+            raise ValueError(
+                f"Region '{region['name']}' mask dimensions {image.size} do not match "
+                f"region dimensions {expected_size}"
+            )
+        if "A" in image.getbands():
+            mask = image.getchannel("A")
+        else:
+            mask = image.convert("L")
+    binary = mask.point(lambda value: 255 if value >= 8 else 0)
+    if binary.getbbox() is None:
+        raise ValueError(f"Region '{region['name']}' mask selects no pixels")
+    return binary, str(path)
+
+
+def masked_difference_metrics(
+    source: Image.Image, rendered: Image.Image, mask: Image.Image, threshold: int
+) -> dict[str, Any]:
+    difference = ImageChops.difference(source, rendered)
+    selected_pixels = mask.histogram()[255]
+    histogram = difference.histogram(mask)
+    total_channel_difference = sum(
+        value * count
+        for channel in range(3)
+        for value, count in enumerate(histogram[channel * 256 : (channel + 1) * 256])
+    )
+    maximum_channel = max_channel_image(difference)
+    maximum_histogram = maximum_channel.histogram(mask)
+    changed_pixels = sum(maximum_histogram[threshold + 1 :])
+    mean_absolute_difference = total_channel_difference / (selected_pixels * 3)
+    return {
+        "selected_pixels": selected_pixels,
+        "mean_absolute_difference": round(mean_absolute_difference, 6),
+        "normalized_mean_absolute_difference": round(mean_absolute_difference / 255, 8),
+        "pixels_over_threshold": changed_pixels,
+        "percent_pixels_over_threshold": round(
+            (changed_pixels / selected_pixels) * 100, 6
+        ),
+        "max_channel_difference": max(
+            (value for value, count in enumerate(maximum_histogram) if count), default=0
+        ),
+        "p95_max_channel_difference": percentile_from_histogram(
+            maximum_histogram, 0.95
+        ),
+        "p99_max_channel_difference": percentile_from_histogram(
+            maximum_histogram, 0.99
+        ),
+    }
+
+
+def masked_edge_normalized_difference(
+    source: Image.Image, rendered: Image.Image, mask: Image.Image
+) -> float:
+    source_edges = ImageOps.grayscale(source).filter(ImageFilter.FIND_EDGES)
+    rendered_edges = ImageOps.grayscale(rendered).filter(ImageFilter.FIND_EDGES)
+    difference = ImageChops.difference(source_edges, rendered_edges)
+    selected_pixels = mask.histogram()[255]
+    histogram = difference.histogram(mask)
+    total = sum(value * count for value, count in enumerate(histogram))
+    return round((total / selected_pixels) / 255, 8)
+
+
+def boundary_discontinuity_difference(
+    source: Image.Image, rendered: Image.Image, box: tuple[int, int, int, int]
+) -> float:
+    x1, y1, x2, y2 = box
+    pairs: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    if y1 > 0:
+        pairs.extend([((x, y1 - 1), (x, y1)) for x in range(x1, x2)])
+    if y2 < source.height:
+        pairs.extend([((x, y2 - 1), (x, y2)) for x in range(x1, x2)])
+    if x1 > 0:
+        pairs.extend([((x1 - 1, y), (x1, y)) for y in range(y1, y2)])
+    if x2 < source.width:
+        pairs.extend([((x2 - 1, y), (x2, y)) for y in range(y1, y2)])
+    if not pairs:
+        return 0.0
+    source_pixels = source.load()
+    rendered_pixels = rendered.load()
+    total = 0
+    for outside, inside in pairs:
+        source_outside = source_pixels[outside]
+        source_inside = source_pixels[inside]
+        rendered_outside = rendered_pixels[outside]
+        rendered_inside = rendered_pixels[inside]
+        for channel in range(3):
+            source_jump = source_inside[channel] - source_outside[channel]
+            rendered_jump = rendered_inside[channel] - rendered_outside[channel]
+            total += abs(source_jump - rendered_jump)
+    return round(total / (len(pairs) * 3 * 255), 8)
 
 
 def worst_tile_metrics(
@@ -363,6 +489,56 @@ def load_regions(path: Path | None, source_size: tuple[int, int]) -> list[dict[s
     return checked
 
 
+def load_asset_ledger(path: Path | None) -> list[dict[str, Any]] | None:
+    if path is None:
+        return None
+    if not path.is_file():
+        raise FileNotFoundError(f"Asset ledger not found: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assets = payload.get("assets") if isinstance(payload, dict) else None
+    if not isinstance(assets, list):
+        raise ValueError("Asset ledger must contain an 'assets' array")
+    checked: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for index, raw in enumerate(assets):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Asset ledger entry {index} must be an object")
+        name = raw.get("name")
+        kind = raw.get("kind")
+        status = raw.get("status")
+        material = raw.get("material")
+        evidence = raw.get("evidence")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"Asset ledger entry {index} requires a non-empty name")
+        if name in names:
+            raise ValueError(f"Duplicate asset ledger name: {name}")
+        names.add(name)
+        if kind not in ASSET_KINDS:
+            raise ValueError(
+                f"Asset '{name}' kind must be one of: {', '.join(sorted(ASSET_KINDS))}"
+            )
+        if status not in ASSET_STATUSES:
+            raise ValueError(
+                f"Asset '{name}' status must be one of: "
+                f"{', '.join(sorted(ASSET_STATUSES))}"
+            )
+        if not isinstance(material, bool):
+            raise ValueError(f"Asset '{name}' material must be true or false")
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError(f"Asset '{name}' requires non-empty evidence")
+        checked.append(
+            {
+                **raw,
+                "name": name,
+                "kind": kind,
+                "status": status,
+                "material": material,
+                "evidence": evidence,
+            }
+        )
+    return checked
+
+
 def safe_name(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-") or "region"
 
@@ -385,6 +561,10 @@ def main() -> int:
     baseline = load_rgb(args.baseline) if args.baseline else None
     stability = load_rgb(args.stability_capture) if args.stability_capture else None
     regions = load_regions(args.regions, source.size)
+    asset_ledger = load_asset_ledger(args.asset_ledger)
+    asset_ledger_by_name = {
+        asset["name"]: asset for asset in (asset_ledger or [])
+    }
 
     sizes = [source.size, rendered.size]
     if baseline is not None:
@@ -428,6 +608,7 @@ def main() -> int:
     ).save(output_dir / "difference.png")
 
     violations: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
     dimensions_match = source.size == rendered.size
     baseline_dimensions_match = baseline is None or source.size == baseline.size
     stability_dimensions_match = stability is None or rendered.size == stability.size
@@ -478,6 +659,53 @@ def main() -> int:
                         "allowed": sorted(LOSSLESS_FORMATS),
                     }
                 )
+        if asset_ledger is None:
+            blocker = {
+                "scope": "provenance",
+                "gate": "strict_asset_ledger",
+                "message": "strict parity requires --asset-ledger",
+            }
+            violations.append(blocker)
+            blockers.append(blocker)
+        else:
+            unresolved = [
+                asset
+                for asset in asset_ledger
+                if asset["material"]
+                and asset["status"] in {"approximate", "missing"}
+            ]
+            for asset in unresolved:
+                blocker = {
+                    "scope": asset["name"],
+                    "gate": "unresolved_material_asset",
+                    "kind": asset["kind"],
+                    "status": asset["status"],
+                    "evidence": asset["evidence"],
+                }
+                violations.append(blocker)
+                blockers.append(blocker)
+            has_text_regions = any(
+                region.get("protected", True) and region.get("kind") == "text"
+                for region in regions
+            )
+            exact_fonts = [
+                asset
+                for asset in asset_ledger
+                if asset["kind"] == "font"
+                and asset["material"]
+                and asset["status"] in {"exact", "derived-deterministically"}
+            ]
+            if has_text_regions and not exact_fonts:
+                blocker = {
+                    "scope": "typography",
+                    "gate": "strict_font_provenance",
+                    "message": (
+                        "protected text regions require an exact or deterministically "
+                        "derived material font entry"
+                    ),
+                }
+                violations.append(blocker)
+                blockers.append(blocker)
         if not dimensions_match or not stability_dimensions_match:
             violations.append(
                 {
@@ -499,6 +727,19 @@ def main() -> int:
                         else None
                     ),
                     "maximum": 0.0,
+                }
+            )
+        exact_changed_pixels = exact_global_metrics["pixels_over"]["0"]
+        if exact_changed_pixels != 0:
+            violations.append(
+                {
+                    "scope": "global",
+                    "gate": "strict_exact_pixel_mismatch",
+                    "actual": exact_changed_pixels,
+                    "maximum": 0,
+                    "max_channel_difference": exact_global_metrics[
+                        "max_channel_difference"
+                    ],
                 }
             )
         if args.regions is None or not regions:
@@ -600,6 +841,26 @@ def main() -> int:
             source_crop, rendered_crop, min(STRICT_TILE_SIZE, width, height)
         )
         edge_difference = edge_normalized_difference(source_crop, rendered_crop)
+        region_mask, region_mask_path = load_region_mask(
+            region, args.regions, (width, height)
+        )
+        masked_metrics = (
+            masked_difference_metrics(
+                source_crop, rendered_crop, region_mask, args.threshold
+            )
+            if region_mask is not None
+            else None
+        )
+        masked_edge_difference = (
+            masked_edge_normalized_difference(
+                source_crop, rendered_crop, region_mask
+            )
+            if region_mask is not None
+            else None
+        )
+        boundary_difference = boundary_discontinuity_difference(
+            source_canvas, rendered_canvas, box
+        )
         save_visuals(
             source_crop,
             rendered_crop,
@@ -685,6 +946,10 @@ def main() -> int:
             "exact_pixel_metrics": region_exact_metrics,
             "tile_metrics": region_tile_metrics,
             "edge_normalized_mean_absolute_difference": edge_difference,
+            "mask": region_mask_path,
+            "masked_metrics": masked_metrics,
+            "masked_edge_normalized_mean_absolute_difference": masked_edge_difference,
+            "boundary_discontinuity_normalized_mean_absolute_difference": boundary_difference,
             "context_bounds": context_bounds,
             "context_metrics": context_metrics,
             "context_edge_normalized_mean_absolute_difference": context_edge_difference,
@@ -734,8 +999,34 @@ def main() -> int:
                         "message": "asset regions require context_padding across every edge",
                     }
                 )
+            if kind == "asset" and region_mask is None:
+                violations.append(
+                    {
+                        "scope": name,
+                        "gate": "strict_asset_mask",
+                        "message": "asset regions require a silhouette mask",
+                    }
+                )
+            if kind == "asset":
+                ledger_name = region.get("ledger_name")
+                if not isinstance(ledger_name, str) or ledger_name not in asset_ledger_by_name:
+                    blocker = {
+                        "scope": name,
+                        "gate": "strict_asset_provenance_link",
+                        "message": (
+                            "asset regions require ledger_name referencing an asset-ledger entry"
+                        ),
+                    }
+                    violations.append(blocker)
+                    blockers.append(blocker)
+            comparison_metrics = masked_metrics or region_metrics
+            comparison_edge_difference = (
+                masked_edge_difference
+                if masked_edge_difference is not None
+                else edge_difference
+            )
             if kind != "full-page":
-                strict_region_nmad = region_metrics[
+                strict_region_nmad = comparison_metrics[
                     "normalized_mean_absolute_difference"
                 ]
                 if strict_region_nmad > STRICT_REGION_MAX_NMAD:
@@ -747,8 +1038,8 @@ def main() -> int:
                             "maximum": STRICT_REGION_MAX_NMAD,
                         }
                     )
-                strict_region_changed = region_exact_metrics["percent_pixels_over"][
-                    str(STRICT_PIXEL_THRESHOLD)
+                strict_region_changed = comparison_metrics[
+                    "percent_pixels_over_threshold"
                 ]
                 if strict_region_changed > STRICT_REGION_MAX_CHANGED_PCT:
                     violations.append(
@@ -759,37 +1050,30 @@ def main() -> int:
                             "maximum": STRICT_REGION_MAX_CHANGED_PCT,
                         }
                     )
-            if kind == "material" and edge_difference > STRICT_EDGE_MAX_NMAD:
+            if (
+                kind == "material"
+                and comparison_edge_difference > STRICT_EDGE_MAX_NMAD
+            ):
                 violations.append(
                     {
                         "scope": name,
                         "gate": "strict_material_edge_normalized_mean_absolute_difference",
-                        "actual": edge_difference,
+                        "actual": comparison_edge_difference,
                         "maximum": STRICT_EDGE_MAX_NMAD,
                     }
                 )
-            if kind == "asset":
-                if context_metrics is None:
-                    violations.append(
-                        {
-                            "scope": name,
-                            "gate": "strict_asset_context_metrics",
-                            "message": "asset context could not be measured",
-                        }
-                    )
-                elif context_metrics[
-                    "normalized_mean_absolute_difference"
-                ] > STRICT_CONTEXT_MAX_NMAD:
-                    violations.append(
-                        {
-                            "scope": name,
-                            "gate": "strict_asset_context_normalized_mean_absolute_difference",
-                            "actual": context_metrics[
-                                "normalized_mean_absolute_difference"
-                            ],
-                            "maximum": STRICT_CONTEXT_MAX_NMAD,
-                        }
-                    )
+            if (
+                kind == "asset"
+                and boundary_difference > STRICT_ASSET_BOUNDARY_MAX_NMAD
+            ):
+                violations.append(
+                    {
+                        "scope": name,
+                        "gate": "strict_asset_boundary_discontinuity",
+                        "actual": boundary_difference,
+                        "maximum": STRICT_ASSET_BOUNDARY_MAX_NMAD,
+                    }
+                )
         if (
             args.require_region_gates
             and protected
@@ -902,6 +1186,12 @@ def main() -> int:
         "source": str(args.source),
         "rendered": str(args.rendered),
         "baseline": str(args.baseline) if args.baseline else None,
+        "pixel_sha256": {
+            "source": pixel_sha256(source),
+            "rendered": pixel_sha256(rendered),
+            "stability_capture": pixel_sha256(stability) if stability else None,
+            "baseline": pixel_sha256(baseline) if baseline else None,
+        },
         "source_dimensions": {"width": source.width, "height": source.height},
         "rendered_dimensions": {"width": rendered.width, "height": rendered.height},
         "baseline_dimensions": (
@@ -938,9 +1228,12 @@ def main() -> int:
         "regression_tolerance": args.regression_tolerance,
         "require_region_gates": args.require_region_gates,
         "strict_parity": args.strict_parity,
+        "asset_ledger_path": str(args.asset_ledger) if args.asset_ledger else None,
+        "asset_ledger": asset_ledger,
         "strict_profile": (
             {
                 "pixel_threshold": STRICT_PIXEL_THRESHOLD,
+                "exact_changed_pixels_maximum": 0,
                 "global_max_normalized_mean_absolute_difference": STRICT_GLOBAL_MAX_NMAD,
                 "global_max_percent_pixels_over_threshold": STRICT_GLOBAL_MAX_CHANGED_PCT,
                 "global_max_percent_pixels_over_20": STRICT_GLOBAL_MAX_CHANGED_PCT_OVER_20,
@@ -948,7 +1241,7 @@ def main() -> int:
                 "region_max_normalized_mean_absolute_difference": STRICT_REGION_MAX_NMAD,
                 "region_max_percent_pixels_over_threshold": STRICT_REGION_MAX_CHANGED_PCT,
                 "material_max_edge_normalized_mean_absolute_difference": STRICT_EDGE_MAX_NMAD,
-                "asset_max_context_normalized_mean_absolute_difference": STRICT_CONTEXT_MAX_NMAD,
+                "asset_max_boundary_discontinuity_normalized_mean_absolute_difference": STRICT_ASSET_BOUNDARY_MAX_NMAD,
                 "tile_size": STRICT_TILE_SIZE,
                 "lossless_formats": sorted(LOSSLESS_FORMATS),
             }
@@ -956,6 +1249,10 @@ def main() -> int:
             else None
         ),
         "violations": violations,
+        "blockers": blockers,
+        "classification": (
+            "achieved" if not violations else "blocked" if blockers else "failed"
+        ),
         "passed": not violations,
         "resized_for_comparison": False,
     }

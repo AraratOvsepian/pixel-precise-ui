@@ -26,6 +26,7 @@ Never silently downgrade strict parity. If a strict run lacks an authoritative f
 - In strict mode, do not generate, redraw, or approximate a missing logo, font, photograph, background plate, or complex texture. A flattened screenshot cannot reveal pixels hidden behind an opaque or translucent foreground; treat missing hidden pixels as a source limitation.
 - Do not submit live forms, mutate production data, or trigger external side effects for visual state.
 - Do not claim parity from geometry alone or from one global image score.
+- A strict run is exact only when the decoded source and render have identical RGB pixel hashes and zero changed pixels. Similarity thresholds are iteration diagnostics, never permission to say `pixel-perfect`.
 - A `passed` result from the script without `--strict-parity` is diagnostic only. It is never completion evidence for an exact-match request.
 
 ## Required workflow
@@ -83,6 +84,7 @@ Run structural measurement, overlay inspection, and the deterministic diff scrip
 python3 scripts/visual_diff.py source.png render.png \
   --stability-capture render-repeat.png \
   --regions regions.json \
+  --asset-ledger asset-ledger.json \
   --baseline previous-render.png \
   --fail-on-regression \
   --strict-parity \
@@ -97,6 +99,8 @@ Strict parity is `achieved` only when the command above returns success and all 
 
 - dimensions and responsive state match;
 - stable captures are reproducible;
+- the source and rendered decoded RGB pixel hashes match and the exact changed-pixel count is zero;
+- the machine-readable asset ledger contains no material `approximate` or `missing` entry, and every asset region links to its ledger record;
 - major edges and baselines are within the registered tolerance, normally one CSS pixel;
 - text family, wrapping, and glyph positioning match;
 - every protected region passes its configured visual gates;
