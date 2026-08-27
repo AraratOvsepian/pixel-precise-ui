@@ -1,99 +1,105 @@
 ---
 name: pixel-precise-ui
-description: Recreate an interface from one or more supplied reference images in an existing frontend codebase, then render, compare, and iterate toward pixel-accurate visual parity. Use for screenshot-to-code and explicit visual-matching requests; do not use for ordinary UI work without a visual reference.
+description: Recreate interfaces from supplied reference images in an existing frontend codebase, using strict asset, viewport, regional-diff, and regression gates for exact-match requests. Use for screenshot-to-code and explicit visual matching; do not use for ordinary UI work without a visual reference.
 license: MIT
 ---
 
 # Pixel Precise UI
 
-Reconstruct supplied interface references with maintainable code in the project's existing frontend stack. Treat explicit user instructions as authoritative when they differ from the image.
+Reconstruct supplied interface references with maintainable code in the project's existing frontend stack. Preserve user intent, product behavior, semantics, accessibility, routes, and data flow.
+
+## Choose the mode before editing
+
+- **Strict parity** is mandatory when the user says `pixel precise`, `pixel perfect`, `exact`, or `match exactly`. Read [references/strict-parity.md](references/strict-parity.md) and follow every gate.
+- **Visual approximation** applies only when the user asks for direction, inspiration, a close recreation, or explicitly accepts approximation. Approximate or generated assets are allowed, but the result cannot be reported as exact.
+
+Never silently downgrade strict parity. If a strict run lacks an authoritative font, logo, image, viewport fact, or deterministic capture surface, exhaust repository evidence and then report the specific blocker before substituting anything.
 
 ## Non-negotiable rules
 
 - Read applicable repository instructions and preserve user-owned changes.
-- Inspect every source image at original resolution before editing. If a required image is unavailable, ask the user to attach it again.
-- Preserve functional behavior, data flow, semantics, accessibility, and existing routes.
-- Do not introduce a new framework when the current stack can implement the design.
-- Never fake parity by using the complete reference screenshot as the page background, overlay, canvas, or single full-page image.
-- Keep text as semantic HTML. Use CSS for ordinary geometry and surfaces, the existing icon system or precise SVG for icons, existing brand files for logos, and raster assets only for genuinely image-based content.
-- Do not submit live forms, mutate production data, or trigger external side effects merely to reach a visual state.
-- Do not claim pixel parity without comparison evidence.
+- Inspect every reference at original resolution and register its probable CSS viewport, device-pixel ratio, route, and UI state.
+- Never use the complete reference screenshot as a page background, overlay, canvas, or single full-page image.
+- Keep text semantic HTML. Use CSS for ordinary geometry and surfaces, an exact product asset or precise SVG for brand/interface marks, and raster assets only for genuinely image-based content.
+- In strict mode, do not generate, redraw, or approximate a missing logo, font, photograph, background plate, or complex texture. A flattened screenshot cannot reveal pixels hidden behind an opaque or translucent foreground; treat missing hidden pixels as a source limitation.
+- Do not submit live forms, mutate production data, or trigger external side effects for visual state.
+- Do not claim parity from geometry alone or from one global image score.
 
-## Workflow
+## Required workflow
 
-### 1. Establish the target
+### 1. Preflight the target
 
-Inspect the target route, components, styles, tokens, fonts, assets, local development command, and current running server state. Record each reference image's pixel dimensions and infer whether it represents a full viewport, crop, device-density export, responsive breakpoint, or UI state.
+Inspect the route, component tree, styles, resets, computed fonts, available font files, product assets, local command, and running server. Read [references/visual-analysis.md](references/visual-analysis.md) and create:
 
-When several images are supplied, map each image to its viewport and state. Do not merge contradictory states into one layout.
+- source registration with confidence labels;
+- asset ledger with `exact`, `derived-deterministically`, `approximate`, or `missing` status;
+- element inventory and semantic component tree;
+- token sheet and computed-style audit;
+- verification landmarks;
+- protected comparison regions in a JSON manifest.
 
-### 2. Produce a visual specification
+In strict mode, unresolved `approximate` or `missing` assets that materially affect visible pixels block an `achieved` result. Ask for the original layered design, clean image plate, exact SVG/logo, or font file when needed.
 
-Before coding, read [references/visual-analysis.md](references/visual-analysis.md) and create its element inventory, component tree, token sheet, and verification landmarks. Plan each meaningful source element separately, but choose its correct code-native representation rather than turning every element into an image file.
+### 2. Establish a deterministic capture
 
-Resolve uncertainty explicitly as `confirmed`, `strongly inferred`, or `uncertain`. Do not invent hidden behavior from a single static frame.
+Render at the reference's exact CSS viewport and device-pixel ratio. Do not score a desktop source against a responsive mobile render.
+
+Before capture:
+
+- wait for the route and fonts to finish loading;
+- disable motion, caret blinking, and time-dependent effects;
+- reproduce only safe local state;
+- inspect console/compilation errors;
+- capture twice without changes and verify stability.
+
+If the available browser surface cannot reproduce the required viewport or scale, use another authorized deterministic local capture surface or report the capture limitation. Do not pretend a different viewport is equivalent.
 
 ### 3. Implement outside-in
 
-Work in this order unless the source makes another order materially better:
+Work in this order unless the source proves another dependency:
 
 1. Viewport and canvas
-2. Primary geometry and alignment
+2. Primary geometry and centerlines
 3. Major surfaces
-4. Typography and wrapping
-5. Images, logos, and icons
+4. Exact typography and wrapping
+5. Exact images, logos, and icons
 6. Controls and states
 7. Borders, shadows, and micro-spacing
-8. Responsive behavior
+8. Responsive behavior supported by reference evidence
 
-Restyle existing functional components instead of replacing them with static replicas. Scope reference-specific tokens to the relevant page or feature unless the image clearly defines a product-wide system.
+Restyle existing functional components. Scope reference tokens locally. Remove failed experiments rather than accumulating overrides or positional transforms.
 
-### 4. Render the real page
+### 4. Compare by protected region
 
-Start or reuse the local development server. Open the exact target route in the available browser-testing surface at the reference viewport. Reproduce only safe local state, reload after source changes when needed, capture a screenshot, and inspect compilation and browser errors.
+Run structural measurement, overlay inspection, and the deterministic diff script. Example:
 
-Match source and rendered screenshots at the same CSS viewport and scale. If the source scale is unknown, document the assumption and validate it using multiple stable landmarks.
+```bash
+python3 scripts/visual_diff.py source.png render.png \
+  --regions regions.json \
+  --baseline previous-render.png \
+  --fail-on-regression \
+  --require-dimensions \
+  --output-dir visual-check
+```
 
-### 5. Compare and iterate
+Change one subsystem per round. Record the hypothesis and relevant regional metrics before editing. Accept a round only when the intended region improves and no protected region exceeds its configured gate or regression tolerance. A better global score never excuses a worse logo, typography, form, or other protected region.
 
-Use all applicable comparison modes:
+### 5. Stop according to evidence
 
-- Structural: measure container edges, centers, baselines, control dimensions, gaps, crop boundaries, and alignment axes.
-- Overlay: compare the source and render at 50% opacity.
-- Difference: run `scripts/visual_diff.py SOURCE RENDER --output-dir DIR` when Pillow is available.
+Strict parity is `achieved` only when all of the following hold in the fixed capture environment:
 
-Never silently resize one image to match the other. Dimension mismatch is a primary error.
+- dimensions and responsive state match;
+- stable captures are reproducible;
+- major edges and baselines are within the registered tolerance, normally one CSS pixel;
+- text family, wrapping, and glyph positioning match;
+- every protected region passes its configured visual gates;
+- normal-size overlay is visually indistinguishable;
+- no visible mismatch is explained by a generated or approximate asset.
 
-Run focused rounds rather than changing unrelated layers together:
+Use `closely approximated` when the result is strong but visible differences remain. Use `blocked` when a required asset, viewport fact, capture capability, or hidden source information prevents convergence. Eight focused rounds is the normal maximum; ask before extending when correctable mismatches remain.
 
-1. Geometry
-2. Typography
-3. Color and surfaces
-4. Assets and micro-spacing
-5. Responsive and interactive states
+### 6. Verify and report
 
-For each round, identify the largest remaining mismatch, state a cause hypothesis, make the smallest relevant change, render again, and record whether the evidence improved. Remove failed experiments instead of accumulating overrides.
+After matching the reference viewport, test a smaller and larger viewport for overflow and accessibility without treating them as parity references unless images were supplied for those states. Run focused lint/type checks.
 
-If the obvious approach does not converge, deliberately test a relevant alternative such as grid versus flex, fixed versus intrinsic sizing, `cover` versus `contain`, exact-font loading versus substitution, CSS versus SVG, or pseudo-element versus markup.
-
-### 6. Stop honestly
-
-Stop when major boundaries and baselines are within roughly two CSS pixels, the normal-size appearance is visually indistinguishable, and remaining differences are attributable to unavailable fonts/assets, source ambiguity, or rendering antialiasing.
-
-Also stop when two consecutive well-targeted iterations do not produce meaningful improvement. Eight comparison rounds is the normal maximum; ask before extending work when correctable differences remain.
-
-### 7. Verify and report
-
-After matching the reference viewport, test one reasonable smaller and one larger viewport. Check overflow, clipping, keyboard focus, labels, contrast, and reduced-motion behavior. Run focused lint or type checks without expanding into unrelated repository repairs.
-
-Report:
-
-1. Reference images and assumptions
-2. Target route and tested viewports
-3. Files and assets changed
-4. Iteration rounds and comparison metrics
-5. Functional and accessibility checks
-6. Remaining differences and causes
-7. Whether parity was achieved, closely approximated, or blocked
-
-Keep the completed local page open when useful for the user's next review.
+Report the mode, reference assumptions, exact capture environment, asset ledger, changed files, iteration ledger, global and regional metrics, functional checks, remaining mismatches, and honest classification. Keep the completed local page open when useful.

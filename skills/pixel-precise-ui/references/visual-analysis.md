@@ -1,112 +1,150 @@
 # Visual Analysis and Reconstruction Worksheet
 
-Use this worksheet before implementation and as the comparison ledger during iteration.
+Create this evidence before implementation. Strict runs must also follow [strict-parity.md](strict-parity.md).
 
 ## 1. Source registration
 
-For each image record:
+For each reference record:
 
-- File and original dimensions
-- Full viewport or crop
-- Probable CSS viewport and device-pixel ratio
-- UI state and route
-- Visible fonts and available font files
-- Known user overrides
-- Confidence and unresolved ambiguity
+- file and original dimensions;
+- full viewport or crop;
+- probable CSS viewport and device-pixel ratio;
+- route, responsive breakpoint, and UI state;
+- visible fonts and available font files;
+- known user overrides;
+- confidence (`confirmed`, `strongly inferred`, or `uncertain`);
+- unresolved ambiguity and its completion impact.
 
-Do not rescale the source until its relationship to the CSS viewport is understood. A two-times-density image may represent half as many CSS pixels.
+Do not resize the source to force a match. Validate a probable scale using several control heights, gutters, and text sizes.
 
-## 2. Element inventory
+## 2. Asset ledger
+
+List every material image, logo, icon, texture, and font before coding.
+
+| Asset | Source bounds | Candidate | Status | Evidence | Implementation | Completion impact |
+|---|---|---|---|---|---|---|
+
+Statuses are `exact`, `derived-deterministically`, `approximate`, and `missing`.
+
+- Reuse an exact authoritative asset and verify crop, transparency, intrinsic size, and color.
+- Keep text semantic HTML.
+- Use CSS for ordinary geometry and surfaces.
+- Use the product icon system or a precise SVG for interface icons.
+- Never approximate a brand mark in strict mode.
+- Use raster/vector assets for genuinely complex imagery.
+- Treat occluded pixels in a flattened composite as unavailable, not inferable facts.
+
+## 3. Element inventory
 
 Create one row per meaningful design element.
 
 | Field | Required content |
 |---|---|
 | Element ID | Stable path such as `login.form.password` |
-| Source bounds | Approximate `x, y, width, height` in source pixels |
+| Source bounds | `x, y, width, height` in registered source pixels |
 | Layer | Background, surface, content, overlay, or decoration |
 | Role | Layout, text, image, icon, input, button, or ornament |
-| Target component | Component and file that should own it |
-| Implementation | Semantic HTML, CSS, SVG, existing asset, raster asset, or icon library |
-| Typography | Family, weight, size, line height, and letter spacing |
-| Visual tokens | Color, spacing, radius, border, shadow, and opacity |
-| Responsive behavior | Fixed, fluid, stacked, hidden, or breakpoint-dependent |
+| Target owner | Component and file |
+| Implementation | HTML, CSS, SVG, exact asset, or deterministic crop |
+| Typography | Computed family, file, weight, size, line height, spacing |
+| Visual tokens | Color, spacing, radius, border, shadow, opacity |
+| Responsive behavior | Fixed, fluid, stacked, hidden, or evidence-limited |
 | Confidence | Confirmed, strongly inferred, or uncertain |
-| Verification landmark | Edge, center, baseline, dimension, or crop boundary |
+| Landmark | Edge, center, baseline, dimension, or crop boundary |
+| Protected region | Region manifest name covering the element |
 
-Follow the inventory with a semantic component tree. Do not mirror visual wrappers mechanically when fewer semantic containers reproduce the same structure.
+Follow with the smallest semantic component tree that preserves behavior.
 
-## 3. Asset decision rules
+## 4. Computed-style audit
 
-- Existing exact asset: reuse it and confirm its crop, transparency, and intrinsic size.
-- Text: semantic HTML; never rasterize it for visual matching.
-- Surface or geometry: CSS, unless the shape is materially too complex.
-- Interface icon: existing product icon system first, then a precise inline SVG.
-- Logo or brand mark: existing authoritative asset; do not approximate it with a generic icon.
-- Photo, texture, or complex illustration: raster or vector asset with explicit `object-fit` and focal position.
-- Missing source asset: search the repository before generating a replacement. Generate or edit only with user authorization.
+For the target render, record actual browser-computed values for:
 
-## 4. Token sheet
+- body and role-specific font family;
+- font size, weight, line height, and letter spacing;
+- element bounding rectangles;
+- box sizing, padding, border, and radius;
+- background image sizing and focal position;
+- active media queries;
+- device-pixel ratio.
 
-Extract the smallest sufficient set:
+Framework declarations do not count as proof. Confirm the computed result after global resets and font loading.
 
-- Canvas, surface, primary text, secondary text, accent, status, and border colors
-- Spacing increments and content gutters
-- Radius and border-width steps
-- Shadow and blur recipes
-- Display, body, label, and utility typography
-- Control heights and maximum content widths
-- Reference breakpoints
+## 5. Token sheet
 
-Prefer scoped CSS variables or the project's existing token mechanism. Avoid one-off values when the source clearly repeats a value; avoid forcing genuinely unique source measurements into an artificial scale.
+Extract the smallest sufficient token set:
 
-## 5. Comparison order
+- canvas, surfaces, primary/secondary text, accents, borders;
+- repeated spacing and content gutters;
+- radii and border widths;
+- shadow, blur, and blend recipes;
+- display, body, label, and utility typography;
+- control heights and maximum widths;
+- reference-supported breakpoints.
 
-Fix mismatches in descending visual impact:
+Prefer page-scoped variables or existing product tokens. Do not force unique measured values into an artificial scale.
 
-1. Image dimensions and viewport model
-2. Page origin, overall scale, and primary centerline
-3. Major component bounds
-4. Text family, size, weight, wrapping, and baseline
-5. Asset crop and icon geometry
-6. Spacing, borders, radii, and shadows
-7. Subtle color and antialiasing differences
+## 6. Protected region manifest
 
-Do not tune micro-shadows while the container is misplaced.
+Create a JSON manifest consumed by `scripts/visual_diff.py`:
 
-## 6. Iteration ledger
-
-For each render record:
-
-| Round | Largest mismatch | Hypothesis | Change | Metric before | Metric after | Keep/revert |
-|---|---|---|---|---|---|---|
-
-Use the diff metric as evidence, not as the only objective. A lower global difference can still hide a more noticeable typography or alignment regression.
-
-## 7. Visual-difference outputs
-
-Run:
-
-```bash
-python3 scripts/visual_diff.py source.png rendered.png --output-dir visual-check
+```json
+{
+  "regions": [
+    {
+      "name": "form",
+      "bounds": [570, 405, 532, 324],
+      "protected": true,
+      "max_normalized_mean_absolute_difference": 0.02,
+      "max_percent_pixels_over_threshold": 5.0
+    }
+  ]
+}
 ```
 
-The script writes:
+Use `[x, y, width, height]`. Protect every visually important region. Configure thresholds for the fixed capture environment; do not weaken them merely to pass the current render.
 
-- `overlay.png`: equal blend of source and render
-- `difference.png`: amplified red heatmap of differences
-- `metrics.json`: dimensions, mean absolute difference, threshold percentage, and difference bounds
+## 7. Comparison order
 
-If Pillow is unavailable, use the environment's bundled Python or install Pillow only with permission. Structural measurement and browser overlays remain valid fallbacks.
+Fix mismatches in descending impact:
 
-## 8. Responsive inference
+1. Source registration and capture stability
+2. Page origin, scale, and centerlines
+3. Major component bounds
+4. Exact typography and wrapping
+5. Asset crop and icon geometry
+6. Spacing, borders, radii, and shadows
+7. Color, texture, and antialiasing
 
-A screenshot proves only its visible viewport. Preserve existing responsive behavior unless multiple references or explicit instructions prove another design. After matching the source, check one smaller and one larger viewport for clipping, overflow, unreadable controls, and broken hierarchy.
+Do not tune micro-effects while the viewport, font, or container is wrong.
 
-## 9. Completion rubric
+## 8. Iteration ledger
 
-- `achieved`: comparison evidence shows no meaningful visible mismatch at the target viewport.
-- `closely approximated`: remaining differences are minor and explained by fonts, antialiasing, missing assets, or source ambiguity.
-- `blocked`: a required asset, viewport fact, environment, or permission is missing and materially prevents further convergence.
+| Round | Target | Hypothesis | Single change | Regional metric before | After | Regressions | Keep/revert |
+|---|---|---|---|---|---|---|---|
 
-State the result honestly and list the remaining visible differences.
+Use the previous accepted render as `--baseline`. A lower global score does not justify a protected-region regression.
+
+## 9. Visual-difference outputs
+
+```bash
+python3 scripts/visual_diff.py source.png rendered.png \
+  --regions regions.json \
+  --baseline previous.png \
+  --fail-on-regression \
+  --require-dimensions \
+  --output-dir visual-check
+```
+
+The script writes overlay, heatmap, global metrics, regional metrics, regression deltas, and gate violations. It never resizes either input.
+
+## 10. Responsive inference
+
+A reference proves only its registered viewport. Match that state first. Check smaller and larger viewports for robustness, but do not score them as parity targets without their own reference images.
+
+## 11. Completion rubric
+
+- `achieved`: deterministic inputs, stable capture, all protected gates pass, structural landmarks/wrapping match, and normal-size overlay is visually indistinguishable.
+- `closely approximated`: strong result with explained visible differences and no exact-match claim.
+- `blocked`: missing authoritative asset, hidden source pixels, unresolved viewport, or unavailable deterministic capture materially prevents convergence.
+
+State the result honestly and list every remaining visible difference.
