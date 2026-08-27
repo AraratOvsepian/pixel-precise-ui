@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -7,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "visual_diff.py"
@@ -15,7 +16,11 @@ SCRIPT = Path(__file__).parents[1] / "scripts" / "visual_diff.py"
 
 class VisualDiffTests(unittest.TestCase):
     def run_diff(
-        self, root: Path, *args: str, auto_ledger: bool = True
+        self,
+        root: Path,
+        *args: str,
+        auto_ledger: bool = True,
+        auto_run_metadata: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         command_args = list(args)
         if (
@@ -41,6 +46,36 @@ class VisualDiffTests(unittest.TestCase):
                 encoding="utf-8",
             )
             command_args.extend(["--asset-ledger", str(ledger)])
+        if (
+            auto_run_metadata
+            and "--strict-parity" in command_args
+            and "--run-metadata" not in command_args
+        ):
+            source_path = Path(command_args[0])
+            with Image.open(source_path) as source_image:
+                source_rgb = ImageOps.exif_transpose(source_image).convert("RGB")
+            digest = hashlib.sha256()
+            digest.update(
+                f"RGB:{source_rgb.width}x{source_rgb.height}:".encode("ascii")
+            )
+            digest.update(source_rgb.tobytes())
+            run_metadata = root / "run-metadata.json"
+            run_metadata.write_text(
+                json.dumps(
+                    {
+                        "run": {
+                            "run_id": "visual-diff-test-run",
+                            "code_tree_hash": "test-code-tree-hash",
+                            "reference_pixel_sha256": digest.hexdigest(),
+                            "route": "/test",
+                            "state_set_hash": "test-state-set-hash",
+                            "state": "default",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            command_args.extend(["--run-metadata", str(run_metadata)])
         return subprocess.run(
             [sys.executable, str(SCRIPT), *command_args],
             cwd=root,
@@ -92,6 +127,7 @@ class VisualDiffTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             metrics = json.loads((output / "metrics.json").read_text())
             self.assertTrue(metrics["passed"])
+            self.assertEqual(metrics["classification"], "diagnostic-pass")
             self.assertEqual(metrics["regions"][0]["metrics"]["pixels_over_threshold"], 0)
             self.assertTrue((output / "overlay.png").is_file())
             self.assertTrue((output / "regions" / "panel-overlay.png").is_file())
@@ -172,6 +208,7 @@ class VisualDiffTests(unittest.TestCase):
             metrics = json.loads((output / "metrics.json").read_text())
             self.assertFalse(metrics["dimensions_match"])
             self.assertFalse(metrics["resized_for_comparison"])
+            self.assertEqual(metrics["classification"], "diagnostic-fail")
 
     def test_context_gate_detects_seam_around_exact_core_crop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -394,6 +431,17 @@ class VisualDiffTests(unittest.TestCase):
             self.assertEqual(
                 metrics["stability"]["normalized_mean_absolute_difference"], 0
             )
+            self.assertEqual(metrics["stability"]["exact_changed_pixels"], 0)
+            self.assertTrue(metrics["stability"]["pixel_hashes_match"])
+            self.assertEqual(
+                metrics["stability_exact_pixel_metrics"]["changed_pixels"], 0
+            )
+            self.assertTrue(metrics["stability_pixel_hashes_match"])
+            self.assertTrue(metrics["stability_pixel_identical"])
+            self.assertEqual(
+                metrics["run"]["reference_pixel_sha256"],
+                metrics["pixel_sha256"]["source"],
+            )
 
     def test_strict_parity_rejects_jpeg_bytes_hidden_behind_png_extension(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -495,6 +543,75 @@ class VisualDiffTests(unittest.TestCase):
                 "pixel_identical_repeat_capture",
                 [violation["gate"] for violation in metrics["violations"]],
             )
+
+    def test_one_changed_pixel_in_4k_capture_fails_exact_stability(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            image = Image.new("RGB", (3840, 2160), (18, 52, 86))
+            image.save(source)
+            image.save(rendered)
+            changed = image.copy()
+            changed.putpixel((3839, 2159), (19, 52, 86))
+            changed.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 3840, 2160],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertEqual(
+                metrics["stability"]["normalized_mean_absolute_difference"], 0
+            )
+            self.assertEqual(metrics["stability"]["exact_changed_pixels"], 1)
+            self.assertEqual(
+                metrics["stability"]["exact_pixel_metrics"]["changed_pixels"], 1
+            )
+            self.assertFalse(metrics["stability"]["pixel_hashes_match"])
+            self.assertEqual(
+                metrics["stability_exact_pixel_metrics"]["changed_pixels"], 1
+            )
+            self.assertFalse(metrics["stability_pixel_hashes_match"])
+            self.assertFalse(metrics["stability_pixel_identical"])
+            self.assertNotEqual(
+                metrics["stability"]["pixel_sha256"]["rendered"],
+                metrics["stability"]["pixel_sha256"]["stability_capture"],
+            )
+            stability_violation = next(
+                violation
+                for violation in metrics["violations"]
+                if violation["gate"] == "pixel_identical_repeat_capture"
+            )
+            self.assertEqual(stability_violation["actual"], 1)
 
     def test_strict_parity_applies_immutable_global_limits_without_cli_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -774,6 +891,212 @@ class VisualDiffTests(unittest.TestCase):
                 [violation["gate"] for violation in metrics["violations"]],
             )
 
+    def test_strict_parity_blocks_without_run_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            image = Image.new("RGB", (20, 20), "#123456")
+            image.save(source)
+            image.save(rendered)
+            image.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 20, 20],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+                auto_run_metadata=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertIsNone(metrics["run"])
+            self.assertEqual(metrics["classification"], "blocked")
+            self.assertIn(
+                "strict_run_metadata",
+                [violation["gate"] for violation in metrics["violations"]],
+            )
+
+    def test_run_metadata_reference_hash_must_match_and_is_emitted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            run_metadata_path = root / "run-metadata.json"
+            output = root / "output"
+            image = Image.new("RGB", (20, 20), "#123456")
+            image.save(source)
+            image.save(rendered)
+            image.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 20, 20],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run = {
+                "run_id": "stale-run",
+                "code_tree_hash": "code-tree-hash",
+                "reference_pixel_sha256": "not-the-decoded-source-hash",
+                "route": "/login",
+                "state_set_hash": "state-set-hash",
+                "state": "default",
+            }
+            run_metadata_path.write_text(
+                json.dumps({"run": run}), encoding="utf-8"
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--run-metadata",
+                str(run_metadata_path),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertEqual(metrics["run"], run)
+            self.assertNotEqual(
+                metrics["run"]["reference_pixel_sha256"],
+                metrics["pixel_sha256"]["source"],
+            )
+            self.assertEqual(metrics["classification"], "blocked")
+            self.assertIn(
+                "run_metadata_reference_pixel_sha256",
+                [violation["gate"] for violation in metrics["violations"]],
+            )
+
+    def test_strict_parity_blocks_complete_reference_raster_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            reused_asset = root / "reused-reference.bmp"
+            regions = root / "regions.json"
+            ledger = root / "asset-ledger.json"
+            output = root / "output"
+            image = Image.new("RGB", (40, 30), "#123456")
+            image.putpixel((8, 7), (200, 100, 50))
+            image.save(source)
+            image.save(rendered)
+            image.save(stability)
+            image.save(reused_asset, format="BMP")
+            self.assertNotEqual(source.read_bytes(), reused_asset.read_bytes())
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 40, 30],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ledger.write_text(
+                json.dumps(
+                    {
+                        "assets": [
+                            {
+                                "name": "declared-safe-background",
+                                "kind": "image",
+                                "status": "exact",
+                                "material": True,
+                                "evidence": "Declared as an authoritative clean plate.",
+                                "path": reused_asset.name,
+                                "usage": "decorative",
+                                "origin": "authoritative",
+                                "contains_foreground_pixels": False,
+                                "contains_context_pixels": False,
+                                "occluded_pixels": "none",
+                                "responsive_safe": True,
+                                "derivation_operations": ["authoritative"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--asset-ledger",
+                str(ledger),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertEqual(metrics["exact_pixel_metrics"]["changed_pixels"], 0)
+            self.assertEqual(metrics["classification"], "blocked")
+            self.assertIn(
+                "strict_full_reference_raster_reuse",
+                [violation["gate"] for violation in metrics["violations"]],
+            )
+            inspection = metrics["raster_asset_inspections"][0]
+            self.assertEqual(inspection["dimensions"], {"width": 40, "height": 30})
+            self.assertTrue(inspection["matches_complete_source"])
+            self.assertEqual(
+                inspection["pixel_sha256"], metrics["pixel_sha256"]["source"]
+            )
+
     def test_unresolved_material_font_is_an_explicit_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -846,6 +1169,87 @@ class VisualDiffTests(unittest.TestCase):
             gates = [violation["gate"] for violation in metrics["violations"]]
             self.assertIn("unresolved_material_asset", gates)
             self.assertIn("strict_font_provenance", gates)
+
+    def test_pixel_identical_reference_cannot_hide_reconstructed_responsive_plate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            ledger = root / "asset-ledger.json"
+            plate = root / "interlocked-background.png"
+            output = root / "output"
+            image = Image.new("RGB", (40, 30), "#123456")
+            image.save(source)
+            image.save(rendered)
+            image.save(stability)
+            Image.new("RGB", (16, 12), "#654321").save(plate)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 40, 30],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ledger.write_text(
+                json.dumps(
+                    {
+                        "assets": [
+                            {
+                                "name": "interlocked-background",
+                                "kind": "image",
+                                "status": "derived-deterministically",
+                                "material": True,
+                                "evidence": "Hidden center was interpolated under the card.",
+                                "path": plate.name,
+                                "usage": "full-bleed-background",
+                                "origin": "reference-crop",
+                                "contains_foreground_pixels": False,
+                                "contains_context_pixels": False,
+                                "occluded_pixels": "reconstructed",
+                                "responsive_safe": False,
+                                "derivation_operations": [
+                                    "lossless-copy",
+                                    "interpolate",
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--asset-ledger",
+                str(ledger),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertEqual(metrics["exact_pixel_metrics"]["pixels_over"]["0"], 0)
+            self.assertEqual(metrics["classification"], "blocked")
+            gates = [violation["gate"] for violation in metrics["violations"]]
+            self.assertIn("invalid_deterministic_provenance", gates)
+            self.assertIn("strict_unsafe_full_bleed_background", gates)
 
 
 if __name__ == "__main__":

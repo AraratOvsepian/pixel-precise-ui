@@ -22,6 +22,8 @@ except ModuleNotFoundError:
     raise SystemExit(2)
 
 
+VALIDATOR_NAME = "pixel-precise-ui-visual-diff"
+VALIDATOR_VERSION = "2.0"
 LOSSLESS_FORMATS = {"PNG", "BMP", "TIFF"}
 STRICT_PIXEL_THRESHOLD = 8
 STRICT_GLOBAL_MAX_NMAD = 0.006
@@ -35,6 +37,31 @@ STRICT_ASSET_BOUNDARY_MAX_NMAD = 0.012
 STRICT_TILE_SIZE = 32
 ASSET_STATUSES = {"exact", "derived-deterministically", "approximate", "missing"}
 ASSET_KINDS = {"font", "image", "icon", "texture", "other"}
+RASTER_ASSET_KINDS = {"image", "icon", "texture"}
+ASSET_USAGES = {
+    "full-bleed-background",
+    "component-surface",
+    "isolated-asset",
+    "decorative",
+    "font",
+    "other",
+}
+ASSET_ORIGINS = {
+    "authoritative",
+    "repository",
+    "reference-crop",
+    "generated",
+    "inferred",
+}
+OCCLUDED_PIXEL_STATES = {"none", "unknown", "reconstructed"}
+RECONSTRUCTION_OPERATIONS = {
+    "interpolate",
+    "inpaint",
+    "generative-fill",
+    "clone-stamp",
+    "redraw",
+    "blur",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -118,6 +145,14 @@ def parse_args() -> argparse.Namespace:
             "requires this file and blocks unresolved material entries."
         ),
     )
+    parser.add_argument(
+        "--run-metadata",
+        type=Path,
+        help=(
+            "JSON run identity shared by strict visual and responsive certification. "
+            "Strict parity requires this file."
+        ),
+    )
     args = parser.parse_args()
 
     if not 0 <= args.threshold <= 255:
@@ -161,6 +196,19 @@ def pixel_sha256(image: Image.Image) -> str:
     digest.update(f"RGB:{image.width}x{image.height}:".encode("ascii"))
     digest.update(image.convert("RGB").tobytes())
     return digest.hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def absolute_path(path: Path | None) -> str | None:
+    """Return a stable absolute path for independently replayed validation."""
+    return str(path.expanduser().resolve()) if path is not None else None
 
 
 def padded(image: Image.Image, size: tuple[int, int]) -> Image.Image:
@@ -227,6 +275,7 @@ def exact_pixel_metrics(source: Image.Image, rendered: Image.Image) -> dict[str,
         str(threshold): sum(histogram[threshold + 1 :]) for threshold in thresholds
     }
     return {
+        "changed_pixels": counts["0"],
         "max_channel_difference": max(
             (value for value, count in enumerate(histogram) if count), default=0
         ),
@@ -539,6 +588,249 @@ def load_asset_ledger(path: Path | None) -> list[dict[str, Any]] | None:
     return checked
 
 
+def load_run_metadata(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    if not path.is_file():
+        raise FileNotFoundError(f"Run metadata not found: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    run = payload.get("run") if isinstance(payload, dict) else None
+    if not isinstance(run, dict):
+        raise ValueError("Run metadata must contain a top-level 'run' object")
+    required = (
+        "run_id",
+        "code_tree_hash",
+        "reference_pixel_sha256",
+        "route",
+        "state_set_hash",
+        "state",
+    )
+    missing = [field for field in required if field not in run]
+    if missing:
+        raise ValueError(
+            "Run metadata 'run' object is missing required fields: "
+            + ", ".join(missing)
+        )
+    for field in required:
+        if not isinstance(run[field], str) or not run[field].strip():
+            raise ValueError(
+                f"Run metadata field 'run.{field}' must be a non-empty string"
+            )
+    return dict(run)
+
+
+def strict_asset_composition_blockers(
+    assets: list[dict[str, Any]], ledger_path: Path, source: Image.Image
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Reject provenance claims that can only match one interlocked screenshot size."""
+    blockers: list[dict[str, Any]] = []
+    inspections: list[dict[str, Any]] = []
+    source_hash = pixel_sha256(source)
+    required_fields = (
+        "usage",
+        "origin",
+        "contains_foreground_pixels",
+        "contains_context_pixels",
+        "occluded_pixels",
+        "responsive_safe",
+        "derivation_operations",
+        "path",
+    )
+    for asset in assets:
+        if asset["kind"] not in RASTER_ASSET_KINDS:
+            continue
+        missing = (
+            [field for field in required_fields if field not in asset]
+            if asset["material"]
+            else []
+        )
+        if missing:
+            blockers.append(
+                {
+                    "scope": asset["name"],
+                    "gate": "strict_asset_composition_evidence",
+                    "missing": missing,
+                }
+            )
+
+        raw_path = asset.get("path")
+        if raw_path is None and not asset["material"]:
+            continue
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            blocker = {
+                "scope": asset["name"],
+                "gate": "strict_raster_asset_path",
+                "message": "material raster assets require a non-empty path",
+            }
+            blockers.append(blocker)
+            inspections.append(
+                {
+                    "name": asset["name"],
+                    "verified": False,
+                    "path": raw_path,
+                    "reason": "missing_or_invalid_path",
+                }
+            )
+            continue
+
+        asset_path = Path(raw_path)
+        if not asset_path.is_absolute():
+            asset_path = ledger_path.parent / asset_path
+        try:
+            asset_image = load_rgb(asset_path)
+        except (FileNotFoundError, OSError) as error:
+            blocker = {
+                "scope": asset["name"],
+                "gate": "strict_raster_asset_unverifiable",
+                "path": str(asset_path),
+                "message": str(error),
+            }
+            blockers.append(blocker)
+            inspections.append(
+                {
+                    "name": asset["name"],
+                    "verified": False,
+                    "path": str(asset_path),
+                    "reason": "unverifiable",
+                    "message": str(error),
+                }
+            )
+            continue
+
+        asset_hash = pixel_sha256(asset_image)
+        dimensions_match_source = asset_image.size == source.size
+        hash_matches_source = asset_hash == source_hash
+        complete_reference_match = dimensions_match_source and hash_matches_source
+        inspection = {
+            "name": asset["name"],
+            "verified": True,
+            "path": str(asset_path),
+            "dimensions": {
+                "width": asset_image.width,
+                "height": asset_image.height,
+            },
+            "pixel_sha256": asset_hash,
+            "source_dimensions": {"width": source.width, "height": source.height},
+            "source_pixel_sha256": source_hash,
+            "dimensions_match_source": dimensions_match_source,
+            "pixel_hash_matches_source": hash_matches_source,
+            "matches_complete_source": complete_reference_match,
+        }
+        inspections.append(inspection)
+        if complete_reference_match:
+            blockers.append(
+                {
+                    "scope": asset["name"],
+                    "gate": "strict_full_reference_raster_reuse",
+                    "message": (
+                        "a raster asset must not reuse the complete decoded reference image"
+                    ),
+                    "path": str(asset_path),
+                    "dimensions": inspection["dimensions"],
+                    "pixel_sha256": asset_hash,
+                    "source_pixel_sha256": source_hash,
+                }
+            )
+
+        if not asset["material"] or missing:
+            continue
+
+        usage = asset["usage"]
+        origin = asset["origin"]
+        contains_foreground = asset["contains_foreground_pixels"]
+        contains_context = asset["contains_context_pixels"]
+        occluded = asset["occluded_pixels"]
+        responsive_safe = asset["responsive_safe"]
+        operations = asset["derivation_operations"]
+        if usage not in ASSET_USAGES:
+            raise ValueError(
+                f"Asset '{asset['name']}' usage must be one of: "
+                f"{', '.join(sorted(ASSET_USAGES))}"
+            )
+        if origin not in ASSET_ORIGINS:
+            raise ValueError(
+                f"Asset '{asset['name']}' origin must be one of: "
+                f"{', '.join(sorted(ASSET_ORIGINS))}"
+            )
+        if not isinstance(contains_foreground, bool):
+            raise ValueError(
+                f"Asset '{asset['name']}' contains_foreground_pixels must be boolean"
+            )
+        if not isinstance(contains_context, bool):
+            raise ValueError(
+                f"Asset '{asset['name']}' contains_context_pixels must be boolean"
+            )
+        if occluded not in OCCLUDED_PIXEL_STATES:
+            raise ValueError(
+                f"Asset '{asset['name']}' occluded_pixels must be none, unknown, "
+                "or reconstructed"
+            )
+        if not isinstance(responsive_safe, bool):
+            raise ValueError(f"Asset '{asset['name']}' responsive_safe must be boolean")
+        if not isinstance(operations, list) or not operations or not all(
+            isinstance(operation, str) and operation for operation in operations
+        ):
+            raise ValueError(
+                f"Asset '{asset['name']}' derivation_operations must contain at least "
+                "one non-empty string"
+            )
+        reconstructed = sorted(RECONSTRUCTION_OPERATIONS.intersection(operations))
+        if asset["status"] == "derived-deterministically" and (
+            occluded != "none" or reconstructed
+        ):
+            blockers.append(
+                {
+                    "scope": asset["name"],
+                    "gate": "invalid_deterministic_provenance",
+                    "status": asset["status"],
+                    "occluded_pixels": occluded,
+                    "reconstruction_operations": reconstructed,
+                }
+            )
+        if not responsive_safe:
+            blockers.append(
+                {
+                    "scope": asset["name"],
+                    "gate": "strict_asset_not_responsive_safe",
+                }
+            )
+        if usage == "full-bleed-background" and (
+            occluded != "none" or contains_foreground or reconstructed
+        ):
+            blockers.append(
+                {
+                    "scope": asset["name"],
+                    "gate": "strict_unsafe_full_bleed_background",
+                    "occluded_pixels": occluded,
+                    "contains_foreground_pixels": contains_foreground,
+                    "reconstruction_operations": reconstructed,
+                }
+            )
+        if usage == "component-surface" and (
+            contains_context or contains_foreground or occluded != "none" or reconstructed
+        ):
+            blockers.append(
+                {
+                    "scope": asset["name"],
+                    "gate": "strict_contaminated_component_surface",
+                    "contains_context_pixels": contains_context,
+                    "contains_foreground_pixels": contains_foreground,
+                    "occluded_pixels": occluded,
+                    "reconstruction_operations": reconstructed,
+                }
+            )
+        if usage == "isolated-asset" and (
+            contains_context or contains_foreground or occluded != "none"
+        ):
+            blockers.append(
+                {
+                    "scope": asset["name"],
+                    "gate": "strict_contaminated_isolated_asset",
+                }
+            )
+    return blockers, inspections
+
+
 def safe_name(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-") or "region"
 
@@ -562,6 +854,7 @@ def main() -> int:
     stability = load_rgb(args.stability_capture) if args.stability_capture else None
     regions = load_regions(args.regions, source.size)
     asset_ledger = load_asset_ledger(args.asset_ledger)
+    run_metadata = load_run_metadata(args.run_metadata)
     asset_ledger_by_name = {
         asset["name"]: asset for asset in (asset_ledger or [])
     }
@@ -586,9 +879,29 @@ def main() -> int:
             source_canvas, baseline_canvas, args.threshold
         )
     stability_metrics = None
+    stability_exact_metrics = None
+    stability_hashes_match = None
+    source_pixel_hash = pixel_sha256(source)
+    rendered_pixel_hash = pixel_sha256(rendered)
+    stability_pixel_hash = pixel_sha256(stability) if stability is not None else None
     if stability_canvas is not None:
         stability_metrics, _, _ = compare_images(
             rendered_canvas, stability_canvas, 0
+        )
+        stability_exact_metrics = exact_pixel_metrics(
+            rendered_canvas, stability_canvas
+        )
+        stability_hashes_match = rendered_pixel_hash == stability_pixel_hash
+        stability_metrics.update(
+            {
+                "exact_pixel_metrics": stability_exact_metrics,
+                "exact_changed_pixels": stability_exact_metrics["changed_pixels"],
+                "pixel_sha256": {
+                    "rendered": rendered_pixel_hash,
+                    "stability_capture": stability_pixel_hash,
+                },
+                "pixel_hashes_match": stability_hashes_match,
+            }
         )
 
     exact_global_metrics = exact_pixel_metrics(source_canvas, rendered_canvas)
@@ -609,9 +922,20 @@ def main() -> int:
 
     violations: list[dict[str, Any]] = []
     blockers: list[dict[str, Any]] = []
+    raster_asset_inspections: list[dict[str, Any]] = []
     dimensions_match = source.size == rendered.size
     baseline_dimensions_match = baseline is None or source.size == baseline.size
     stability_dimensions_match = stability is None or rendered.size == stability.size
+    stability_pixel_identical = (
+        None
+        if stability is None
+        else (
+            stability_dimensions_match
+            and stability_exact_metrics is not None
+            and stability_exact_metrics["changed_pixels"] == 0
+            and stability_hashes_match is True
+        )
+    )
     if args.require_dimensions and not dimensions_match:
         violations.append(
             {"scope": "global", "gate": "dimensions", "message": "source and candidate differ"}
@@ -659,6 +983,23 @@ def main() -> int:
                         "allowed": sorted(LOSSLESS_FORMATS),
                     }
                 )
+        if run_metadata is None:
+            blocker = {
+                "scope": "run-metadata",
+                "gate": "strict_run_metadata",
+                "message": "strict parity requires --run-metadata",
+            }
+            violations.append(blocker)
+            blockers.append(blocker)
+        elif run_metadata["reference_pixel_sha256"] != source_pixel_hash:
+            blocker = {
+                "scope": "run-metadata",
+                "gate": "run_metadata_reference_pixel_sha256",
+                "actual": run_metadata["reference_pixel_sha256"],
+                "expected": source_pixel_hash,
+            }
+            violations.append(blocker)
+            blockers.append(blocker)
         if asset_ledger is None:
             blocker = {
                 "scope": "provenance",
@@ -684,6 +1025,14 @@ def main() -> int:
                 }
                 violations.append(blocker)
                 blockers.append(blocker)
+            (
+                composition_blockers,
+                raster_asset_inspections,
+            ) = strict_asset_composition_blockers(
+                asset_ledger, args.asset_ledger, source
+            )
+            violations.extend(composition_blockers)
+            blockers.extend(composition_blockers)
             has_text_regions = any(
                 region.get("protected", True) and region.get("kind") == "text"
                 for region in regions
@@ -714,19 +1063,32 @@ def main() -> int:
                     "message": "source, candidate, and stability capture must match exactly",
                 }
             )
-        if stability_metrics is None or stability_metrics[
-            "normalized_mean_absolute_difference"
-        ] != 0:
+        if (
+            stability_exact_metrics is None
+            or not stability_dimensions_match
+            or stability_exact_metrics["changed_pixels"] != 0
+            or not stability_hashes_match
+        ):
             violations.append(
                 {
                     "scope": "stability",
                     "gate": "pixel_identical_repeat_capture",
                     "actual": (
-                        stability_metrics["normalized_mean_absolute_difference"]
-                        if stability_metrics is not None
+                        stability_exact_metrics["changed_pixels"]
+                        if stability_exact_metrics is not None
                         else None
                     ),
-                    "maximum": 0.0,
+                    "maximum": 0,
+                    "actual_changed_pixels": (
+                        stability_exact_metrics["changed_pixels"]
+                        if stability_exact_metrics is not None
+                        else None
+                    ),
+                    "maximum_changed_pixels": 0,
+                    "dimensions_match": stability_dimensions_match,
+                    "rendered_pixel_sha256": rendered_pixel_hash,
+                    "stability_capture_pixel_sha256": stability_pixel_hash,
+                    "pixel_hashes_match": stability_hashes_match,
                 }
             )
         exact_changed_pixels = exact_global_metrics["pixels_over"]["0"]
@@ -1183,13 +1545,36 @@ def main() -> int:
             )
 
     metrics = {
+        "validator": {
+            "name": VALIDATOR_NAME,
+            "version": VALIDATOR_VERSION,
+            "script_sha256": file_sha256(Path(__file__)),
+        },
+        "replay": {
+            "schema_version": "1.0",
+            "source": absolute_path(args.source),
+            "rendered": absolute_path(args.rendered),
+            "baseline": absolute_path(args.baseline),
+            "regions": absolute_path(args.regions),
+            "stability_capture": absolute_path(args.stability_capture),
+            "asset_ledger": absolute_path(args.asset_ledger),
+            "run_metadata": absolute_path(args.run_metadata),
+            "threshold": args.threshold,
+            "fail_over_pct": args.fail_over_pct,
+            "max_normalized_mad": args.max_normalized_mad,
+            "fail_on_regression": args.fail_on_regression,
+            "regression_tolerance": args.regression_tolerance,
+            "require_dimensions": args.require_dimensions,
+            "require_region_gates": args.require_region_gates,
+            "strict_parity": args.strict_parity,
+        },
         "source": str(args.source),
         "rendered": str(args.rendered),
         "baseline": str(args.baseline) if args.baseline else None,
         "pixel_sha256": {
-            "source": pixel_sha256(source),
-            "rendered": pixel_sha256(rendered),
-            "stability_capture": pixel_sha256(stability) if stability else None,
+            "source": source_pixel_hash,
+            "rendered": rendered_pixel_hash,
+            "stability_capture": stability_pixel_hash,
             "baseline": pixel_sha256(baseline) if baseline else None,
         },
         "source_dimensions": {"width": source.width, "height": source.height},
@@ -1224,12 +1609,20 @@ def main() -> int:
         "tile_metrics": global_tile_metrics,
         "baseline_global": baseline_global_metrics,
         "stability": stability_metrics,
+        "stability_exact_pixel_metrics": stability_exact_metrics,
+        "stability_pixel_hashes_match": stability_hashes_match,
+        "stability_pixel_identical": stability_pixel_identical,
         "regions": region_results,
         "regression_tolerance": args.regression_tolerance,
         "require_region_gates": args.require_region_gates,
         "strict_parity": args.strict_parity,
+        "run_metadata_path": str(args.run_metadata) if args.run_metadata else None,
+        "run": run_metadata,
         "asset_ledger_path": str(args.asset_ledger) if args.asset_ledger else None,
         "asset_ledger": asset_ledger,
+        "raster_asset_inspections": (
+            raster_asset_inspections if args.strict_parity else None
+        ),
         "strict_profile": (
             {
                 "pixel_threshold": STRICT_PIXEL_THRESHOLD,
@@ -1251,9 +1644,20 @@ def main() -> int:
         "violations": violations,
         "blockers": blockers,
         "classification": (
-            "achieved" if not violations else "blocked" if blockers else "failed"
+            (
+                "achieved"
+                if not violations
+                else "blocked" if blockers else "failed"
+            )
+            if args.strict_parity
+            else "diagnostic-pass" if not violations else "diagnostic-fail"
         ),
         "passed": not violations,
+        "completion_eligible": False,
+        "completion_note": (
+            "Reference parity is one input. Only certify_run.py can emit an overall "
+            "completion-eligible result."
+        ),
         "resized_for_comparison": False,
     }
     (output_dir / "metrics.json").write_text(

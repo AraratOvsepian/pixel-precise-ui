@@ -45,7 +45,24 @@ Encode that ledger as JSON and pass it to the validator rather than leaving prov
       "kind": "icon",
       "status": "exact",
       "material": true,
-      "evidence": "Authoritative SVG from the product repository."
+      "evidence": "Authoritative transparent mark from the product repository.",
+      "path": "assets/product-logo.png",
+      "usage": "isolated-asset",
+      "origin": "authoritative",
+      "contains_foreground_pixels": false,
+      "contains_context_pixels": false,
+      "occluded_pixels": "none",
+      "responsive_safe": true,
+      "derivation_operations": ["authoritative-source"],
+      "file_sha256": "<sha256 of exact file bytes>",
+      "pixel_sha256": "<sha256 of decoded RGB pixels>",
+      "intrinsic_dimensions": [240, 160],
+      "alpha": {
+        "has_alpha": true,
+        "bbox": [8, 5, 232, 154],
+        "transparent_fraction": 0.61,
+        "perimeter_transparent_fraction": 0.94
+      }
     },
     {
       "name": "display-typeface",
@@ -59,6 +76,22 @@ Encode that ledger as JSON and pass it to the validator rather than leaving prov
 ```
 
 Allowed `kind` values are `font`, `image`, `icon`, `texture`, and `other`. Every entry requires `name`, `kind`, `status`, `material`, and non-empty `evidence`. A material `approximate` or `missing` entry makes the machine result `blocked`, even if the rendered screenshot happens to score well. Protected text also requires an exact or deterministically derived material font entry.
+
+For every material raster asset, also provide the responsive composition fields defined in [responsive-validation.md](responsive-validation.md). `derived-deterministically` means that visible pixels came from lossless copying, cropping, masking, or another provenance-preserving operation. It is an invalid status when hidden pixels were interpolated, inpainted, generated, cloned, redrawn, or blurred. The validator blocks that contradiction even if the reference and render are pixel-identical.
+
+### Occluded-pixel and interlocked-plate gate
+
+A flattened reference cannot supply the background hidden by a foreground panel. Do not create a full-page background by filling that hole and then rely on a fixed card to cover it. Do not crop a component together with the surrounding page and use that rectangle as the component background. These are interlocked raster plates: they can coincide at one viewport and separate at another.
+
+Before accepting any page background or component plate, prove from the ledger that:
+
+- `occluded_pixels` is `none`;
+- no foreground or surrounding-context pixels are baked into the asset;
+- no reconstruction operation was used;
+- the asset is marked and evidenced as `responsive_safe`;
+- an isolated raster mark has a real alpha channel.
+
+Unknown or reconstructed occluded pixels are a source blocker, not a prompt to manufacture a hidden clean plate in strict mode.
 
 ### Asset-isolation gate
 
@@ -148,7 +181,7 @@ Create a JSON file for the important visual regions:
 
 `bounds` are `[x, y, width, height]` in source pixels. Strict manifests require one protected `kind: full-page` region covering the complete source. Every protected region requires a `kind`: `full-page`, `asset`, `material`, `text`, `surface`, or `control`. Asset regions require an alpha/silhouette `mask`, a `ledger_name`, and `context_padding`. Material masks may exclude live semantic foreground pixels so the glass/body itself is scored independently, but the excluded text/icon must have its own protected region. A mask is never permission to omit a mismatch. `context_padding` is either one positive integer or `[left, top, right, bottom]` and expands the comparison across every asset boundary.
 
-Run exact requests with `--strict-parity --stability-capture repeat.png --asset-ledger asset-ledger.json`. Strict completion has an immutable zero-tolerance gate:
+Run exact requests with `--strict-parity --stability-capture repeat.png --asset-ledger asset-ledger.json --run-metadata <collector-case-run-metadata.json>`. Strict completion has an immutable zero-tolerance gate:
 
 | Completion gate | Required value |
 |---|---:|
@@ -171,7 +204,9 @@ The following fixed ceilings remain useful as focused iteration diagnostics. The
 | Material edge-detail difference | 0.012 |
 | Asset boundary-discontinuity difference | 0.012 |
 
-The output records RGB pixel hashes, exact changed-pixel counts, percentages over 0/1/4/8/16/20/32, maximum channel error, p95/p99/p99.9 channel error, the worst tile location, masked material/asset scores, asset-boundary discontinuity, provenance blockers, and the final `achieved`, `failed`, or `blocked` classification. Manifest gates may be added only when they are stricter than the fixed profile. A baseline comparison answers “did it improve?”; only zero-difference strict success answers “is it exact?”
+The output records RGB pixel hashes, exact changed-pixel counts, exact repeat-capture hashes/counts, percentages over 0/1/4/8/16/20/32, maximum channel error, p95/p99/p99.9 channel error, the worst tile location, masked material/asset scores, asset-boundary discontinuity, provenance blockers, and the reference-only `achieved`, `failed`, or `blocked` classification. A non-strict run can emit only `diagnostic-pass` or `diagnostic-fail`. Manifest gates may be added only when they are stricter than the fixed profile. A baseline comparison answers “did it improve?”; only zero-difference strict success answers “is this registered reference viewport exact?”
+
+`achieved` is not an overall completion claim. Run the responsive protocol and `certify_run.py`; only the joint certificate may set `completion_eligible: true`.
 
 Do not omit a visibly important region merely because it scores poorly.
 
@@ -209,6 +244,7 @@ Avoid compensating transforms that align one landmark while leaving the underlyi
 - dimensional surfaces pass individual color and edge-detail gates and reproduce the evidenced material stack;
 - structural landmarks and wrapping match;
 - overlay is visually indistinguishable at normal size.
+- the result is eligible to feed the joint certifier, but is not independently completion-eligible.
 
 ### Closely approximated
 
