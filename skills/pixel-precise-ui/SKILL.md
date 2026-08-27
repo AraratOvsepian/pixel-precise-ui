@@ -26,6 +26,7 @@ Never silently downgrade strict parity. If a strict run lacks an authoritative f
 - In strict mode, do not generate, redraw, or approximate a missing logo, font, photograph, background plate, or complex texture. A flattened screenshot cannot reveal pixels hidden behind an opaque or translucent foreground; treat missing hidden pixels as a source limitation.
 - Do not submit live forms, mutate production data, or trigger external side effects for visual state.
 - Do not claim parity from geometry alone or from one global image score.
+- A `passed` result from the script without `--strict-parity` is diagnostic only. It is never completion evidence for an exact-match request.
 
 ## Required workflow
 
@@ -55,6 +56,8 @@ Before capture:
 - inspect console/compilation errors;
 - capture twice without changes and verify stability.
 
+Both scored captures must be genuinely lossless images. Inspect their decoded format; a `.png` filename containing JPEG bytes is a failed capture. Strict validation requires the two unchanged captures to be pixel-identical.
+
 If the available browser surface cannot reproduce the required viewport or scale, use another authorized deterministic local capture surface or report the capture limitation. Do not pretend a different viewport is equivalent.
 
 ### 3. Implement outside-in
@@ -78,11 +81,11 @@ Run structural measurement, overlay inspection, and the deterministic diff scrip
 
 ```bash
 python3 scripts/visual_diff.py source.png render.png \
+  --stability-capture render-repeat.png \
   --regions regions.json \
   --baseline previous-render.png \
   --fail-on-regression \
-  --require-region-gates \
-  --require-dimensions \
+  --strict-parity \
   --output-dir visual-check
 ```
 
@@ -90,7 +93,7 @@ Change one subsystem per round. Record the hypothesis and relevant regional metr
 
 ### 5. Stop according to evidence
 
-Strict parity is `achieved` only when all of the following hold in the fixed capture environment:
+Strict parity is `achieved` only when the command above returns success and all of the following hold in the fixed capture environment:
 
 - dimensions and responsive state match;
 - stable captures are reproducible;
@@ -102,7 +105,8 @@ Strict parity is `achieved` only when all of the following hold in the fixed cap
 - normal-size overlay is visually indistinguishable;
 - no visible mismatch is explained by a generated or approximate asset.
 
-Use `closely approximated` when the result is strong but visible differences remain. Use `blocked` when a required asset, viewport fact, capture capability, or hidden source information prevents convergence. Eight focused rounds is the normal maximum; ask before extending when correctable mismatches remain.
+Use `closely approximated` when the result is strong but visible differences remain. Use `blocked` when a required asset, viewport fact, capture capability, or hidden source information prevents convergence.
+Do not stop because a round count was reached. Continue focused iterations while a correctable mismatch remains and the user authorized convergence. Stop only on strict success or an evidence-backed blocker that cannot be corrected from available source information; never relabel a failed strict run as achieved.
 
 ### 6. Verify and report
 

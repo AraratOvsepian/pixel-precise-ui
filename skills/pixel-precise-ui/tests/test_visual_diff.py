@@ -314,6 +314,206 @@ class VisualDiffTests(unittest.TestCase):
                 [violation["gate"] for violation in metrics["violations"]],
             )
 
+    def test_strict_parity_passes_only_with_lossless_stable_full_page_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            image = Image.new("RGB", (40, 30), "#123456")
+            image.save(source)
+            image.save(rendered)
+            image.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 40, 30],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertTrue(metrics["passed"])
+            self.assertTrue(metrics["strict_parity"])
+            self.assertEqual(
+                metrics["stability"]["normalized_mean_absolute_difference"], 0
+            )
+
+    def test_strict_parity_rejects_jpeg_bytes_hidden_behind_png_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            image = Image.new("RGB", (40, 30), "#123456")
+            image.save(source)
+            image.save(rendered, format="JPEG")
+            image.save(stability, format="JPEG")
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 40, 30],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            lossless_violations = [
+                violation
+                for violation in metrics["violations"]
+                if violation["gate"] == "lossless_format"
+            ]
+            self.assertEqual(len(lossless_violations), 2)
+            self.assertTrue(all(item["actual"] == "JPEG" for item in lossless_violations))
+
+    def test_strict_parity_rejects_non_repeatable_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            image = Image.new("RGB", (40, 30), "#123456")
+            image.save(source)
+            image.save(rendered)
+            changed = image.copy()
+            changed.putpixel((1, 1), (255, 255, 255))
+            changed.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 40, 30],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            self.assertIn(
+                "pixel_identical_repeat_capture",
+                [violation["gate"] for violation in metrics["violations"]],
+            )
+
+    def test_strict_parity_applies_immutable_global_limits_without_cli_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            rendered = root / "rendered.png"
+            stability = root / "stability.png"
+            regions = root / "regions.json"
+            output = root / "output"
+            original = Image.new("RGB", (100, 100), "#101010")
+            original.save(source)
+            changed = original.copy()
+            drawing = ImageDraw.Draw(changed)
+            drawing.rectangle((10, 10, 29, 29), fill="white")
+            changed.save(rendered)
+            changed.save(stability)
+            regions.write_text(
+                json.dumps(
+                    {
+                        "regions": [
+                            {
+                                "name": "full-page",
+                                "kind": "full-page",
+                                "bounds": [0, 0, 100, 100],
+                                "protected": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_diff(
+                root,
+                str(source),
+                str(rendered),
+                "--regions",
+                str(regions),
+                "--strict-parity",
+                "--stability-capture",
+                str(stability),
+                "--output-dir",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            metrics = json.loads((output / "metrics.json").read_text())
+            gates = [violation["gate"] for violation in metrics["violations"]]
+            self.assertIn("strict_normalized_mean_absolute_difference", gates)
+            self.assertIn("strict_worst_tile_normalized_mean_absolute_difference", gates)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -93,25 +93,29 @@ Create a JSON manifest consumed by `scripts/visual_diff.py`:
 {
   "regions": [
     {
-      "name": "email-glass-surface",
-      "bounds": [579, 443, 515, 66],
-      "protected": true,
-      "max_normalized_mean_absolute_difference": 0.02,
-      "max_edge_normalized_mean_absolute_difference": 0.02
+      "name": "full-page",
+      "kind": "full-page",
+      "bounds": [0, 0, 1672, 941],
+      "protected": true
     },
     {
       "name": "logo",
+      "kind": "asset",
       "bounds": [775, 108, 122, 99],
       "protected": true,
-      "max_normalized_mean_absolute_difference": 0.01,
-      "context_padding": 16,
-      "max_context_normalized_mean_absolute_difference": 0.01
+      "context_padding": 16
+    },
+    {
+      "name": "email-glass-surface",
+      "kind": "material",
+      "bounds": [579, 443, 515, 66],
+      "protected": true
     }
   ]
 }
 ```
 
-Use `[x, y, width, height]`. Protect every visually important region and each repeated dimensional control separately. Use `context_padding` for isolated assets and the edge gate for glass, bevels, rims, inset highlights, and other high-frequency material structure. Every protected region in strict mode needs an absolute gate; regression-only regions are insufficient. Configure thresholds for the fixed capture environment; do not weaken them merely to pass the current render.
+Use `[x, y, width, height]`. Exact requests require a complete `full-page` region plus typed regions for every visually important element and every repeated dimensional control. Types are `full-page`, `asset`, `material`, `text`, `surface`, and `control`. Use `context_padding` for isolated assets. The strict profile automatically applies global, exact-pixel distribution, worst-tile, regional, asset-context, and material-edge gates; do not replace it with hand-selected thresholds.
 
 ### Material stack worksheet
 
@@ -148,14 +152,14 @@ Use the previous accepted render as `--baseline`. A lower global score does not 
 ```bash
 python3 scripts/visual_diff.py source.png rendered.png \
   --regions regions.json \
+  --stability-capture rendered-repeat.png \
   --baseline previous.png \
   --fail-on-regression \
-  --require-region-gates \
-  --require-dimensions \
+  --strict-parity \
   --output-dir visual-check
 ```
 
-The script writes overlay, heatmap, global metrics, regional metrics, context overlays, edge-detail metrics, regression deltas, and gate violations. It never resizes either input.
+The script writes overlay, heatmap, global and regional metrics, exact changed-pixel distributions, worst-tile evidence, context overlays, edge-detail metrics, stability evidence, regression deltas, and gate violations. It never resizes either input. Strict mode rejects lossy inputs even when their filenames end in `.png`.
 
 ## 10. Responsive inference
 
@@ -163,7 +167,7 @@ A reference proves only its registered viewport. Match that state first. Check s
 
 ## 11. Completion rubric
 
-- `achieved`: deterministic inputs, stable capture, all protected gates pass, structural landmarks/wrapping match, and normal-size overlay is visually indistinguishable.
+- `achieved`: lossless deterministic inputs, pixel-identical repeat capture, immutable strict profile success, structural landmarks/wrapping match, and normal-size overlay is visually indistinguishable.
 - `closely approximated`: strong result with explained visible differences and no exact-match claim.
 - `blocked`: missing authoritative asset, hidden source pixels, unresolved viewport, or unavailable deterministic capture materially prevents convergence.
 

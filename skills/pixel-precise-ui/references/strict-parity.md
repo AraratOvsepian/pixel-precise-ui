@@ -87,6 +87,8 @@ The capture environment must provide:
 
 Take two unchanged screenshots. Use the diff script with threshold zero or an explicitly justified antialias tolerance. Unstable captures must be fixed before reference comparison.
 
+Inspect decoded image formats, not filename suffixes. Strict scoring accepts only PNG, BMP, or TIFF inputs and requires a second unchanged capture whose decoded pixels are identical to the candidate. A JPEG capture renamed to `.png` is lossy and invalid.
+
 ## 2. Region manifest
 
 Create a JSON file for the important visual regions:
@@ -95,34 +97,44 @@ Create a JSON file for the important visual regions:
 {
   "regions": [
     {
-      "name": "panel",
-      "bounds": [521, 73, 630, 796],
-      "protected": true,
-      "max_normalized_mean_absolute_difference": 0.02,
-      "max_percent_pixels_over_threshold": 5.0
+      "name": "full-page",
+      "kind": "full-page",
+      "bounds": [0, 0, 1672, 941],
+      "protected": true
     },
     {
       "name": "logo",
+      "kind": "asset",
       "bounds": [775, 108, 122, 99],
       "protected": true,
-      "max_normalized_mean_absolute_difference": 0.02,
-      "context_padding": 16,
-      "max_context_normalized_mean_absolute_difference": 0.02
+      "context_padding": 16
     },
     {
       "name": "email-glass-surface",
+      "kind": "material",
       "bounds": [579, 443, 515, 66],
-      "protected": true,
-      "max_normalized_mean_absolute_difference": 0.02,
-      "max_edge_normalized_mean_absolute_difference": 0.02
+      "protected": true
     }
   ]
 }
 ```
 
-`bounds` are `[x, y, width, height]` in source pixels. `context_padding` is either one positive integer or `[left, top, right, bottom]`; it expands the comparison across an asset boundary. The edge metric compares high-frequency structure and exposes missing rims, bevels, inset highlights, and similar material detail. Choose tolerances for the fixed environment and source type rather than treating the example values as universal. Brand marks, text, and controls normally require tighter gates than photographic texture.
+`bounds` are `[x, y, width, height]` in source pixels. Strict manifests require one protected `kind: full-page` region covering the complete source. Every protected region requires a `kind`: `full-page`, `asset`, `material`, `text`, `surface`, or `control`. Asset regions require `context_padding`; material regions automatically receive an edge-detail gate. `context_padding` is either one positive integer or `[left, top, right, bottom]` and expands the comparison across every asset boundary.
 
-Run strict manifests with `--require-region-gates`. Every protected region must have at least one absolute gate. A baseline-only comparison answers “did it get worse?” but not “is it good enough?” A region with `context_padding` must also define `max_context_normalized_mean_absolute_difference`.
+Run exact requests with `--strict-parity --stability-capture repeat.png`. The fixed profile is intentionally not configurable to be looser:
+
+| Gate | Fixed maximum |
+|---|---:|
+| Global normalized mean absolute difference | 0.006 |
+| Global pixels with any channel difference over 8 | 3% |
+| Global pixels with any channel difference over 20 | 0.75% |
+| Worst 32 × 32 tile normalized difference | 0.06 |
+| Non-full-page region normalized difference | 0.012 |
+| Non-full-page pixels over 8 | 6% |
+| Material edge-detail difference | 0.012 |
+| Asset padded-context difference | 0.012 |
+
+The output also records exact changed-pixel counts, percentages over 0/1/4/8/16/20/32, maximum channel error, p95/p99/p99.9 channel error, and the worst tile location. Manifest gates may be added only when they are stricter than the fixed profile. A baseline comparison answers “did it improve?”; only strict-profile success answers “is it complete?”
 
 Do not omit a visibly important region merely because it scores poorly.
 
@@ -142,6 +154,7 @@ Rules:
 5. Reject and revert if a protected region regresses beyond the manifest or command tolerance.
 6. Inspect the overlay at normal size even when metrics pass.
 7. Reject any visible rectangular seam, halo discontinuity, baked control ghost, or flattened material cue regardless of a passing core or global score.
+8. Continue while mismatches are correctable and the user authorized convergence. A round limit is not a completion condition.
 
 Avoid compensating transforms that align one landmark while leaving the underlying font, intrinsic dimensions, or flow incorrect.
 
@@ -150,7 +163,9 @@ Avoid compensating transforms that align one landmark while leaving the underlyi
 ### Achieved
 
 - capture is stable and correctly registered;
+- all decoded images are lossless and the repeated candidate capture is pixel-identical;
 - authoritative/deterministic assets cover all material pixels;
+- the immutable strict profile passes, including full-page, exact-pixel distribution, worst-tile, typed-region, asset-context, and material-edge gates;
 - protected regional gates pass;
 - isolated assets pass their padded context gates without visible seams;
 - dimensional surfaces pass individual color and edge-detail gates and reproduce the evidenced material stack;

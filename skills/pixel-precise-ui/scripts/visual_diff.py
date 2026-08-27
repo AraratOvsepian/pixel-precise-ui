@@ -21,6 +21,19 @@ except ModuleNotFoundError:
     raise SystemExit(2)
 
 
+LOSSLESS_FORMATS = {"PNG", "BMP", "TIFF"}
+STRICT_PIXEL_THRESHOLD = 8
+STRICT_GLOBAL_MAX_NMAD = 0.006
+STRICT_GLOBAL_MAX_CHANGED_PCT = 3.0
+STRICT_GLOBAL_MAX_CHANGED_PCT_OVER_20 = 0.75
+STRICT_GLOBAL_MAX_TILE_NMAD = 0.06
+STRICT_REGION_MAX_NMAD = 0.012
+STRICT_REGION_MAX_CHANGED_PCT = 6.0
+STRICT_EDGE_MAX_NMAD = 0.012
+STRICT_CONTEXT_MAX_NMAD = 0.012
+STRICT_TILE_SIZE = 32
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -38,8 +51,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold",
         type=int,
-        default=20,
-        help="Per-channel difference threshold from 0 to 255 (default: 20)",
+        default=8,
+        help="Per-channel difference threshold from 0 to 255 (default: 8)",
     )
     parser.add_argument(
         "--fail-over-pct",
@@ -80,6 +93,20 @@ def parse_args() -> argparse.Namespace:
             "configured context area has no context gate"
         ),
     )
+    parser.add_argument(
+        "--strict-parity",
+        action="store_true",
+        help=(
+            "Apply the immutable exact-match profile: lossless inputs, exact dimensions, "
+            "a pixel-identical stability capture, a full-page protected region, typed "
+            "asset/material regions, and fixed global/regional pixel-error ceilings"
+        ),
+    )
+    parser.add_argument(
+        "--stability-capture",
+        type=Path,
+        help="Second unchanged capture used to prove deterministic rendering",
+    )
     args = parser.parse_args()
 
     if not 0 <= args.threshold <= 255:
@@ -94,6 +121,13 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} must be between 0 and 1")
     if args.fail_on_regression and args.baseline is None:
         parser.error("--fail-on-regression requires --baseline")
+    if args.strict_parity and args.stability_capture is None:
+        parser.error("--strict-parity requires --stability-capture")
+    if args.strict_parity and args.threshold > STRICT_PIXEL_THRESHOLD:
+        parser.error(
+            f"--strict-parity requires --threshold <= {STRICT_PIXEL_THRESHOLD}; "
+            "looser thresholds are not allowed"
+        )
     return args
 
 
@@ -102,6 +136,13 @@ def load_rgb(path: Path) -> Image.Image:
         raise FileNotFoundError(f"Image not found: {path}")
     with Image.open(path) as image:
         return ImageOps.exif_transpose(image).convert("RGB")
+
+
+def image_format(path: Path) -> str | None:
+    if not path.is_file():
+        raise FileNotFoundError(f"Image not found: {path}")
+    with Image.open(path) as image:
+        return image.format
 
 
 def padded(image: Image.Image, size: tuple[int, int]) -> Image.Image:
@@ -141,6 +182,66 @@ def compare_images(
         ),
     }
     return metrics, difference, threshold_mask
+
+
+def max_channel_image(difference: Image.Image) -> Image.Image:
+    red, green, blue = difference.split()
+    return ImageChops.lighter(ImageChops.lighter(red, green), blue)
+
+
+def percentile_from_histogram(histogram: list[int], percentile: float) -> int:
+    target = max(1, int(sum(histogram) * percentile + 0.999999))
+    running = 0
+    for value, count in enumerate(histogram):
+        running += count
+        if running >= target:
+            return value
+    return len(histogram) - 1
+
+
+def exact_pixel_metrics(source: Image.Image, rendered: Image.Image) -> dict[str, Any]:
+    difference = ImageChops.difference(source, rendered)
+    maximum_channel = max_channel_image(difference)
+    histogram = maximum_channel.histogram()
+    total_pixels = source.width * source.height
+    thresholds = (0, 1, 4, 8, 16, 20, 32)
+    counts = {
+        str(threshold): sum(histogram[threshold + 1 :]) for threshold in thresholds
+    }
+    return {
+        "max_channel_difference": max(
+            (value for value, count in enumerate(histogram) if count), default=0
+        ),
+        "p95_max_channel_difference": percentile_from_histogram(histogram, 0.95),
+        "p99_max_channel_difference": percentile_from_histogram(histogram, 0.99),
+        "p999_max_channel_difference": percentile_from_histogram(histogram, 0.999),
+        "pixels_over": counts,
+        "percent_pixels_over": {
+            key: round((count / total_pixels) * 100, 6) for key, count in counts.items()
+        },
+    }
+
+
+def worst_tile_metrics(
+    source: Image.Image, rendered: Image.Image, tile_size: int
+) -> dict[str, Any]:
+    worst_nmad = -1.0
+    worst_bounds = [0, 0, min(tile_size, source.width), min(tile_size, source.height)]
+    for y in range(0, source.height, tile_size):
+        for x in range(0, source.width, tile_size):
+            box = (x, y, min(x + tile_size, source.width), min(y + tile_size, source.height))
+            source_tile = source.crop(box)
+            rendered_tile = rendered.crop(box)
+            metrics, _, _ = compare_images(source_tile, rendered_tile, 0)
+            nmad = metrics["normalized_mean_absolute_difference"]
+            if nmad > worst_nmad:
+                worst_nmad = nmad
+                worst_bounds = [x, y, box[2] - x, box[3] - y]
+    return {
+        "tile_size": tile_size,
+        "worst_normalized_mean_absolute_difference": round(worst_nmad, 8),
+        "worst_bounds": worst_bounds,
+    }
 
 
 def edge_normalized_difference(source: Image.Image, rendered: Image.Image) -> float:
@@ -188,6 +289,7 @@ def load_regions(path: Path | None, source_size: tuple[int, int]) -> list[dict[s
             raise ValueError(f"Region {index} must be an object")
         name = raw.get("name")
         bounds = raw.get("bounds")
+        kind = raw.get("kind")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"Region {index} requires a non-empty name")
         if name in names:
@@ -205,6 +307,18 @@ def load_regions(path: Path | None, source_size: tuple[int, int]) -> list[dict[s
         if x + width > source_width or y + height > source_height:
             raise ValueError(
                 f"Region '{name}' extends outside source dimensions {source_size}: {bounds}"
+            )
+        if kind is not None and kind not in {
+            "full-page",
+            "asset",
+            "material",
+            "text",
+            "surface",
+            "control",
+        }:
+            raise ValueError(
+                f"Region '{name}' kind must be full-page, asset, material, text, "
+                "surface, or control"
             )
         for key in (
             "max_normalized_mean_absolute_difference",
@@ -269,15 +383,19 @@ def main() -> int:
     source = load_rgb(args.source)
     rendered = load_rgb(args.rendered)
     baseline = load_rgb(args.baseline) if args.baseline else None
+    stability = load_rgb(args.stability_capture) if args.stability_capture else None
     regions = load_regions(args.regions, source.size)
 
     sizes = [source.size, rendered.size]
     if baseline is not None:
         sizes.append(baseline.size)
+    if stability is not None:
+        sizes.append(stability.size)
     canvas_size = (max(size[0] for size in sizes), max(size[1] for size in sizes))
     source_canvas = padded(source, canvas_size)
     rendered_canvas = padded(rendered, canvas_size)
     baseline_canvas = padded(baseline, canvas_size) if baseline is not None else None
+    stability_canvas = padded(stability, canvas_size) if stability is not None else None
 
     global_metrics, global_difference, _ = compare_images(
         source_canvas, rendered_canvas, args.threshold
@@ -287,6 +405,16 @@ def main() -> int:
         baseline_global_metrics, _, _ = compare_images(
             source_canvas, baseline_canvas, args.threshold
         )
+    stability_metrics = None
+    if stability_canvas is not None:
+        stability_metrics, _, _ = compare_images(
+            rendered_canvas, stability_canvas, 0
+        )
+
+    exact_global_metrics = exact_pixel_metrics(source_canvas, rendered_canvas)
+    global_tile_metrics = worst_tile_metrics(
+        source_canvas, rendered_canvas, STRICT_TILE_SIZE
+    )
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -302,6 +430,7 @@ def main() -> int:
     violations: list[dict[str, Any]] = []
     dimensions_match = source.size == rendered.size
     baseline_dimensions_match = baseline is None or source.size == baseline.size
+    stability_dimensions_match = stability is None or rendered.size == stability.size
     if args.require_dimensions and not dimensions_match:
         violations.append(
             {"scope": "global", "gate": "dimensions", "message": "source and candidate differ"}
@@ -309,6 +438,14 @@ def main() -> int:
     if args.require_dimensions and not baseline_dimensions_match:
         violations.append(
             {"scope": "baseline", "gate": "dimensions", "message": "source and baseline differ"}
+        )
+    if args.require_dimensions and not stability_dimensions_match:
+        violations.append(
+            {
+                "scope": "stability",
+                "gate": "dimensions",
+                "message": "candidate and stability capture differ",
+            }
         )
     if (
         args.fail_over_pct is not None
@@ -322,6 +459,119 @@ def main() -> int:
                 "maximum": args.fail_over_pct,
             }
         )
+
+    if args.strict_parity:
+        strict_paths = [args.source, args.rendered, args.stability_capture]
+        if args.baseline is not None:
+            strict_paths.append(args.baseline)
+        strict_formats = {
+            str(path): image_format(path) for path in strict_paths if path is not None
+        }
+        for path, detected_format in strict_formats.items():
+            if detected_format not in LOSSLESS_FORMATS:
+                violations.append(
+                    {
+                        "scope": "capture",
+                        "gate": "lossless_format",
+                        "path": path,
+                        "actual": detected_format,
+                        "allowed": sorted(LOSSLESS_FORMATS),
+                    }
+                )
+        if not dimensions_match or not stability_dimensions_match:
+            violations.append(
+                {
+                    "scope": "strict-parity",
+                    "gate": "exact_dimensions",
+                    "message": "source, candidate, and stability capture must match exactly",
+                }
+            )
+        if stability_metrics is None or stability_metrics[
+            "normalized_mean_absolute_difference"
+        ] != 0:
+            violations.append(
+                {
+                    "scope": "stability",
+                    "gate": "pixel_identical_repeat_capture",
+                    "actual": (
+                        stability_metrics["normalized_mean_absolute_difference"]
+                        if stability_metrics is not None
+                        else None
+                    ),
+                    "maximum": 0.0,
+                }
+            )
+        if args.regions is None or not regions:
+            violations.append(
+                {
+                    "scope": "manifest",
+                    "gate": "required_regions",
+                    "message": "strict parity requires a non-empty protected-region manifest",
+                }
+            )
+        full_page_regions = [
+            region
+            for region in regions
+            if region.get("protected", True)
+            and region.get("kind") == "full-page"
+            and region["bounds"] == [0, 0, source.width, source.height]
+        ]
+        if not full_page_regions:
+            violations.append(
+                {
+                    "scope": "manifest",
+                    "gate": "full_page_region",
+                    "message": (
+                        "strict parity requires a protected kind=full-page region covering "
+                        "the complete source"
+                    ),
+                }
+            )
+        if global_metrics["normalized_mean_absolute_difference"] > STRICT_GLOBAL_MAX_NMAD:
+            violations.append(
+                {
+                    "scope": "global",
+                    "gate": "strict_normalized_mean_absolute_difference",
+                    "actual": global_metrics["normalized_mean_absolute_difference"],
+                    "maximum": STRICT_GLOBAL_MAX_NMAD,
+                }
+            )
+        strict_changed_pct = exact_global_metrics["percent_pixels_over"][
+            str(STRICT_PIXEL_THRESHOLD)
+        ]
+        if strict_changed_pct > STRICT_GLOBAL_MAX_CHANGED_PCT:
+            violations.append(
+                {
+                    "scope": "global",
+                    "gate": f"strict_percent_pixels_over_{STRICT_PIXEL_THRESHOLD}",
+                    "actual": strict_changed_pct,
+                    "maximum": STRICT_GLOBAL_MAX_CHANGED_PCT,
+                }
+            )
+        changed_pct_over_20 = exact_global_metrics["percent_pixels_over"]["20"]
+        if changed_pct_over_20 > STRICT_GLOBAL_MAX_CHANGED_PCT_OVER_20:
+            violations.append(
+                {
+                    "scope": "global",
+                    "gate": "strict_percent_pixels_over_20",
+                    "actual": changed_pct_over_20,
+                    "maximum": STRICT_GLOBAL_MAX_CHANGED_PCT_OVER_20,
+                }
+            )
+        if global_tile_metrics[
+            "worst_normalized_mean_absolute_difference"
+        ] > STRICT_GLOBAL_MAX_TILE_NMAD:
+            violations.append(
+                {
+                    "scope": "global",
+                    "gate": "strict_worst_tile_normalized_mean_absolute_difference",
+                    "actual": global_tile_metrics[
+                        "worst_normalized_mean_absolute_difference"
+                    ],
+                    "maximum": STRICT_GLOBAL_MAX_TILE_NMAD,
+                    "bounds": global_tile_metrics["worst_bounds"],
+                }
+            )
     if (
         args.max_normalized_mad is not None
         and global_metrics["normalized_mean_absolute_difference"] > args.max_normalized_mad
@@ -344,6 +594,10 @@ def main() -> int:
         rendered_crop = rendered_canvas.crop(box)
         region_metrics, region_difference, _ = compare_images(
             source_crop, rendered_crop, args.threshold
+        )
+        region_exact_metrics = exact_pixel_metrics(source_crop, rendered_crop)
+        region_tile_metrics = worst_tile_metrics(
+            source_crop, rendered_crop, min(STRICT_TILE_SIZE, width, height)
         )
         edge_difference = edge_normalized_difference(source_crop, rendered_crop)
         save_visuals(
@@ -426,7 +680,10 @@ def main() -> int:
             "name": name,
             "bounds": region["bounds"],
             "protected": protected,
+            "kind": region.get("kind"),
             "metrics": region_metrics,
+            "exact_pixel_metrics": region_exact_metrics,
+            "tile_metrics": region_tile_metrics,
             "edge_normalized_mean_absolute_difference": edge_difference,
             "context_bounds": context_bounds,
             "context_metrics": context_metrics,
@@ -458,6 +715,81 @@ def main() -> int:
                     "message": "protected regions require at least one absolute visual gate",
                 }
             )
+
+        kind = region.get("kind")
+        if args.strict_parity and protected:
+            if kind is None:
+                violations.append(
+                    {
+                        "scope": name,
+                        "gate": "strict_region_kind",
+                        "message": "every protected strict region requires a kind",
+                    }
+                )
+            if kind == "asset" and context_padding is None:
+                violations.append(
+                    {
+                        "scope": name,
+                        "gate": "strict_asset_context",
+                        "message": "asset regions require context_padding across every edge",
+                    }
+                )
+            if kind != "full-page":
+                strict_region_nmad = region_metrics[
+                    "normalized_mean_absolute_difference"
+                ]
+                if strict_region_nmad > STRICT_REGION_MAX_NMAD:
+                    violations.append(
+                        {
+                            "scope": name,
+                            "gate": "strict_region_normalized_mean_absolute_difference",
+                            "actual": strict_region_nmad,
+                            "maximum": STRICT_REGION_MAX_NMAD,
+                        }
+                    )
+                strict_region_changed = region_exact_metrics["percent_pixels_over"][
+                    str(STRICT_PIXEL_THRESHOLD)
+                ]
+                if strict_region_changed > STRICT_REGION_MAX_CHANGED_PCT:
+                    violations.append(
+                        {
+                            "scope": name,
+                            "gate": f"strict_region_percent_pixels_over_{STRICT_PIXEL_THRESHOLD}",
+                            "actual": strict_region_changed,
+                            "maximum": STRICT_REGION_MAX_CHANGED_PCT,
+                        }
+                    )
+            if kind == "material" and edge_difference > STRICT_EDGE_MAX_NMAD:
+                violations.append(
+                    {
+                        "scope": name,
+                        "gate": "strict_material_edge_normalized_mean_absolute_difference",
+                        "actual": edge_difference,
+                        "maximum": STRICT_EDGE_MAX_NMAD,
+                    }
+                )
+            if kind == "asset":
+                if context_metrics is None:
+                    violations.append(
+                        {
+                            "scope": name,
+                            "gate": "strict_asset_context_metrics",
+                            "message": "asset context could not be measured",
+                        }
+                    )
+                elif context_metrics[
+                    "normalized_mean_absolute_difference"
+                ] > STRICT_CONTEXT_MAX_NMAD:
+                    violations.append(
+                        {
+                            "scope": name,
+                            "gate": "strict_asset_context_normalized_mean_absolute_difference",
+                            "actual": context_metrics[
+                                "normalized_mean_absolute_difference"
+                            ],
+                            "maximum": STRICT_CONTEXT_MAX_NMAD,
+                        }
+                    )
         if (
             args.require_region_gates
             and protected
@@ -575,9 +907,18 @@ def main() -> int:
         "baseline_dimensions": (
             {"width": baseline.width, "height": baseline.height} if baseline else None
         ),
+        "stability_capture": (
+            str(args.stability_capture) if args.stability_capture else None
+        ),
+        "stability_dimensions": (
+            {"width": stability.width, "height": stability.height}
+            if stability
+            else None
+        ),
         "canvas_dimensions": {"width": canvas_size[0], "height": canvas_size[1]},
         "dimensions_match": dimensions_match,
         "baseline_dimensions_match": baseline_dimensions_match,
+        "stability_dimensions_match": stability_dimensions_match,
         "threshold": args.threshold,
         "mean_absolute_difference": global_metrics["mean_absolute_difference"],
         "normalized_mean_absolute_difference": global_metrics[
@@ -589,10 +930,31 @@ def main() -> int:
         ],
         "difference_bounding_box": global_metrics["difference_bounding_box"],
         "global": global_metrics,
+        "exact_pixel_metrics": exact_global_metrics,
+        "tile_metrics": global_tile_metrics,
         "baseline_global": baseline_global_metrics,
+        "stability": stability_metrics,
         "regions": region_results,
         "regression_tolerance": args.regression_tolerance,
         "require_region_gates": args.require_region_gates,
+        "strict_parity": args.strict_parity,
+        "strict_profile": (
+            {
+                "pixel_threshold": STRICT_PIXEL_THRESHOLD,
+                "global_max_normalized_mean_absolute_difference": STRICT_GLOBAL_MAX_NMAD,
+                "global_max_percent_pixels_over_threshold": STRICT_GLOBAL_MAX_CHANGED_PCT,
+                "global_max_percent_pixels_over_20": STRICT_GLOBAL_MAX_CHANGED_PCT_OVER_20,
+                "global_max_tile_normalized_mean_absolute_difference": STRICT_GLOBAL_MAX_TILE_NMAD,
+                "region_max_normalized_mean_absolute_difference": STRICT_REGION_MAX_NMAD,
+                "region_max_percent_pixels_over_threshold": STRICT_REGION_MAX_CHANGED_PCT,
+                "material_max_edge_normalized_mean_absolute_difference": STRICT_EDGE_MAX_NMAD,
+                "asset_max_context_normalized_mean_absolute_difference": STRICT_CONTEXT_MAX_NMAD,
+                "tile_size": STRICT_TILE_SIZE,
+                "lossless_formats": sorted(LOSSLESS_FORMATS),
+            }
+            if args.strict_parity
+            else None
+        ),
         "violations": violations,
         "passed": not violations,
         "resized_for_comparison": False,
