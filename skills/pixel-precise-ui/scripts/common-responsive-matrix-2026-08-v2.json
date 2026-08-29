@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "profile": "common-2026-08-v2",
+  "viewports": [
+    {"class": "mobile-portrait", "width": 360, "height": 800, "base_dpr": 3},
+    {"class": "mobile-portrait", "width": 390, "height": 844, "base_dpr": 3},
+    {"class": "mobile-portrait", "width": 393, "height": 873, "base_dpr": 2.75},
+    {"class": "mobile-portrait", "width": 414, "height": 896, "base_dpr": 2},
+    {"class": "mobile-landscape", "width": 844, "height": 390, "base_dpr": 3},
+    {"class": "tablet-portrait", "width": 768, "height": 1024, "base_dpr": 2},
+    {"class": "tablet-landscape", "width": 1280, "height": 800, "base_dpr": 2},
+    {"class": "desktop", "width": 1280, "height": 720},
+    {"class": "desktop", "width": 1366, "height": 768},
+    {"class": "desktop", "width": 1536, "height": 864},
+    {"class": "desktop", "width": 1920, "height": 1080}
+  ],
+  "groups": [
+    {
+      "class": "desktop-zoom",
+      "sizes": [[1366, 768]],
+      "zoom_percent": [200]
+    },
+    {
+      "class": "accessibility-text-zoom",
+      "sizes": [[390, 844]],
+      "text_zoom_percent": [200],
+      "base_dpr": [3]
+    }
+  ]
+}

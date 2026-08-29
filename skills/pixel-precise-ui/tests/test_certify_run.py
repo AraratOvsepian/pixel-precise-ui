@@ -87,7 +87,7 @@ class CertifyRunTests(unittest.TestCase):
         }
         self.responsive: dict[str, Any] = {
             "schema_version": "2.0",
-            "profile": "common-2026-07-v1",
+            "profile": "common-2026-08-v2",
             "passed": True,
             "classification": "responsive-certified",
             "completion_eligible": False,
@@ -96,7 +96,7 @@ class CertifyRunTests(unittest.TestCase):
             "run": deepcopy(self.run),
             "collector": {
                 "name": "pixel-precise-ui-capture",
-                "version": "2.0",
+                "version": "2.1",
                 "harness_collected": True,
                 "trace_sha256": "e" * 64,
                 "script_sha256": sha256(CAPTURE_SCRIPT),
@@ -337,7 +337,7 @@ class CertifyRunTests(unittest.TestCase):
         }
         responsive["validator"] = {
             "name": "pixel-precise-ui-responsive-audit",
-            "version": "2.0",
+            "version": "2.1",
             "script_sha256": sha256(RESPONSIVE_SCRIPT),
         }
         # Even with authentic validator fingerprints and forged pass fields, the CLI

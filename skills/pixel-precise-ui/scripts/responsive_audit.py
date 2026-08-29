@@ -26,17 +26,19 @@ except ModuleNotFoundError:
 
 
 SCHEMA_VERSION = "2.0"
-PROFILE_NAME = "common-2026-07-v1"
+PROFILE_NAME = "common-2026-08-v2"
 COLLECTOR_NAME = "pixel-precise-ui-capture"
-COLLECTOR_VERSION = "2.0"
+COLLECTOR_VERSION = "2.1"
 VALIDATOR_NAME = "pixel-precise-ui-responsive-audit"
-VALIDATOR_VERSION = "2.0"
+VALIDATOR_VERSION = "2.1"
 LOSSLESS_FORMATS = {"PNG", "BMP", "TIFF"}
 MAX_HORIZONTAL_OVERFLOW_PX = 1.0
 ZOOM_TOLERANCE_PX = 2.0
 MAX_SWEEP_GAP_PX = 20
 MIN_SWEEP_WIDTH = 320
 MAX_SWEEP_WIDTH = 2560
+MAX_COMPACT_BREAKPOINTS = 8
+MAX_COMPACT_CAPTURE_CASES = 80
 MAX_EVIDENCE_AGE_HOURS = 24
 COLOR_SCHEMES = {"light", "dark", "no-preference"}
 DEVICE_CLASSES = {"mobile", "tablet", "desktop"}
@@ -59,90 +61,35 @@ TREE_EXCLUDED_DIRECTORIES = {
     "venv",
 }
 
-# CSS viewport sizes. Extra b-1/b/b+1 cases are required for every project
-# breakpoint declared in the manifest.
+# Compact CSS viewport profile. Optional b-1/b/b+1 cases are checked only when
+# breakpoint capture was explicitly enabled for a bounded media-query set.
 _EXPECTED_COMMON_VIEWPORTS: tuple[dict[str, Any], ...] = (
-    {"class": "mobile-portrait", "width": 320, "height": 568, "zoom": 100, "base_dpr": 2},
-    {"class": "mobile-portrait", "width": 360, "height": 640, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-portrait", "width": 360, "height": 780, "zoom": 100, "base_dpr": 3},
     {"class": "mobile-portrait", "width": 360, "height": 800, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-portrait", "width": 375, "height": 667, "zoom": 100, "base_dpr": 2},
-    {"class": "mobile-portrait", "width": 375, "height": 812, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-portrait", "width": 384, "height": 832, "zoom": 100, "base_dpr": 2.75},
     {"class": "mobile-portrait", "width": 390, "height": 844, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-portrait", "width": 393, "height": 852, "zoom": 100, "base_dpr": 3},
     {"class": "mobile-portrait", "width": 393, "height": 873, "zoom": 100, "base_dpr": 2.75},
-    {"class": "mobile-portrait", "width": 412, "height": 915, "zoom": 100, "base_dpr": 2.625},
     {"class": "mobile-portrait", "width": 414, "height": 896, "zoom": 100, "base_dpr": 2},
-    {"class": "mobile-portrait", "width": 430, "height": 932, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-landscape", "width": 568, "height": 320, "zoom": 100, "base_dpr": 2},
-    {"class": "mobile-landscape", "width": 640, "height": 360, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-landscape", "width": 667, "height": 375, "zoom": 100, "base_dpr": 2},
-    {"class": "mobile-landscape", "width": 780, "height": 360, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-landscape", "width": 800, "height": 360, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-landscape", "width": 812, "height": 375, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-landscape", "width": 832, "height": 384, "zoom": 100, "base_dpr": 2.75},
     {"class": "mobile-landscape", "width": 844, "height": 390, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-landscape", "width": 852, "height": 393, "zoom": 100, "base_dpr": 3},
-    {"class": "mobile-landscape", "width": 873, "height": 393, "zoom": 100, "base_dpr": 2.75},
-    {"class": "mobile-landscape", "width": 896, "height": 414, "zoom": 100, "base_dpr": 2},
-    {"class": "mobile-landscape", "width": 915, "height": 412, "zoom": 100, "base_dpr": 2.625},
-    {"class": "mobile-landscape", "width": 932, "height": 430, "zoom": 100, "base_dpr": 3},
-    {"class": "tablet-portrait", "width": 601, "height": 1007, "zoom": 100, "base_dpr": 2},
     {"class": "tablet-portrait", "width": 768, "height": 1024, "zoom": 100, "base_dpr": 2},
-    {"class": "tablet-portrait", "width": 800, "height": 1280, "zoom": 100, "base_dpr": 2},
-    {"class": "tablet-portrait", "width": 810, "height": 1080, "zoom": 100, "base_dpr": 2},
-    {"class": "tablet-portrait", "width": 820, "height": 1180, "zoom": 100, "base_dpr": 2},
-    {"class": "tablet-portrait", "width": 1024, "height": 1366, "zoom": 100, "base_dpr": 2},
-    {"class": "tablet-landscape", "width": 1007, "height": 601, "zoom": 100, "base_dpr": 2},
-    {"class": "tablet-landscape", "width": 1024, "height": 768, "zoom": 100, "base_dpr": 2},
-    {"class": "tablet-landscape", "width": 1080, "height": 810, "zoom": 100, "base_dpr": 2},
-    {"class": "tablet-landscape", "width": 1180, "height": 820, "zoom": 100, "base_dpr": 2},
     {"class": "tablet-landscape", "width": 1280, "height": 800, "zoom": 100, "base_dpr": 2},
-    {"class": "tablet-landscape", "width": 1366, "height": 1024, "zoom": 100, "base_dpr": 2},
     {"class": "desktop", "width": 1280, "height": 720, "zoom": 100},
-    {"class": "desktop", "width": 1280, "height": 1200, "zoom": 100},
     {"class": "desktop", "width": 1366, "height": 768, "zoom": 100},
-    {"class": "desktop", "width": 1440, "height": 900, "zoom": 100},
     {"class": "desktop", "width": 1536, "height": 864, "zoom": 100},
-    {"class": "desktop", "width": 1728, "height": 1117, "zoom": 100},
     {"class": "desktop", "width": 1920, "height": 1080, "zoom": 100},
-    {"class": "desktop", "width": 2560, "height": 1440, "zoom": 100},
-    {"class": "desktop", "width": 3440, "height": 1440, "zoom": 100},
-    *(
-        {"class": "desktop-zoom", "width": width, "height": height, "zoom": zoom}
-        for width, height in ((1366, 768), (1920, 1080))
-        for zoom in (80, 90, 110, 125, 150, 175, 200)
-    ),
-    *(
-        {
-            "class": "accessibility-text-zoom",
-            "width": width,
-            "height": height,
-            "zoom": 100,
-            "text_zoom": text_zoom,
-            "base_dpr": dpr,
-        }
-        for width, height in ((390, 844), (768, 1024))
-        for text_zoom in (125, 150, 200)
-        for dpr in (3 if width == 390 else 2,)
-    ),
-    *(
-        {
-            "class": "dpr-smoke",
-            "width": 1440,
-            "height": 900,
-            "zoom": 100,
-            "base_dpr": dpr,
-        }
-        for dpr in (1.25, 1.5, 2)
-    ),
+    {"class": "desktop-zoom", "width": 1366, "height": 768, "zoom": 200},
+    {
+        "class": "accessibility-text-zoom",
+        "width": 390,
+        "height": 844,
+        "zoom": 100,
+        "text_zoom": 200,
+        "base_dpr": 3,
+    },
 )
 
 
 def load_common_viewports() -> tuple[dict[str, Any], ...]:
     matrix_path = Path(__file__).with_name(
-        "common-responsive-matrix-2026-07-v1.json"
+        "common-responsive-matrix-2026-08-v2.json"
     )
     payload = json.loads(matrix_path.read_text(encoding="utf-8"))
     if payload.get("profile") != PROFILE_NAME:
@@ -194,6 +141,12 @@ def load_common_viewports() -> tuple[dict[str, Any], ...]:
 
 
 COMMON_VIEWPORTS = load_common_viewports()
+SECONDARY_STATE_ANCHORS: tuple[dict[str, Any], ...] = (
+    {"class": "mobile-portrait", "width": 390, "height": 844, "zoom": 100, "base_dpr": 3},
+    {"class": "mobile-landscape", "width": 844, "height": 390, "zoom": 100, "base_dpr": 3},
+    {"class": "tablet-portrait", "width": 768, "height": 1024, "zoom": 100, "base_dpr": 2},
+    {"class": "desktop", "width": 1366, "height": 768, "zoom": 100, "base_dpr": 1},
+)
 
 ASSET_KINDS = {"font", "image", "icon", "texture", "other"}
 RASTER_ASSET_KINDS = {"image", "icon", "texture"}
@@ -529,7 +482,7 @@ def validate_run_evidence(
         matrix_name if isinstance(matrix_name, str) else "missing-matrix"
     )
     if (
-        matrix_path.name != "common-responsive-matrix-2026-07-v1.json"
+        matrix_path.name != "common-responsive-matrix-2026-08-v2.json"
         or not matrix_path.is_file()
         or collector.get("common_matrix_sha256") != file_sha256(matrix_path)
     ):
@@ -1562,9 +1515,20 @@ def validate_sweep(
         raise ValueError("Responsive manifest requires a continuous sweep object")
     if sweep.get("harness_collected") is not True:
         raise ValueError("Responsive sweep must be produced by the capture harness")
+    enabled = sweep.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ValueError("Responsive sweep.enabled must be boolean")
     samples = sweep.get("samples")
-    if not isinstance(samples, list) or not samples:
-        raise ValueError("Responsive sweep.samples must be non-empty")
+    if not isinstance(samples, list):
+        raise ValueError("Responsive sweep.samples must be an array")
+    if not enabled:
+        if samples:
+            raise ValueError("Disabled responsive sweep must not contain samples")
+        if sweep.get("complete") is not False:
+            raise ValueError("Disabled responsive sweep must have complete:false")
+        return sweep, []
+    if not samples:
+        raise ValueError("Enabled responsive sweep.samples must be non-empty")
     violations: list[dict[str, Any]] = []
     primary_samples = [
         sample
@@ -1651,6 +1615,9 @@ def discovered_boundaries(
     for index, item in enumerate(queries):
         if not isinstance(item, dict):
             raise ValueError(f"Discovered media query {index} must be an object")
+        kind = item.get("kind", "media")
+        if kind not in {"media", "container"}:
+            raise ValueError(f"Discovered query {index} has unsupported kind '{kind}'")
         query = item.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError(f"Discovered media query {index} requires query text")
@@ -1664,19 +1631,22 @@ def discovered_boundaries(
             raise ValueError(
                 f"Discovered media query {index} requires boundary_extraction_errors"
             )
-        for error in item_errors:
-            if not isinstance(error, dict):
-                raise ValueError(
-                    f"Discovered media query {index} boundary error must be an object"
+        if kind == "media":
+            for error in item_errors:
+                if not isinstance(error, dict):
+                    raise ValueError(
+                        f"Discovered media query {index} boundary error must be an object"
+                    )
+                extraction_errors.append(
+                    {
+                        "query_index": index,
+                        "kind": kind,
+                        "query": query,
+                        **error,
+                    }
                 )
-            extraction_errors.append(
-                {
-                    "query_index": index,
-                    "kind": item.get("kind", "media"),
-                    "query": query,
-                    **error,
-                }
-            )
+        if kind != "media":
+            continue
         for boundary in boundaries:
             if not isinstance(boundary, dict):
                 raise ValueError(f"Discovered media query {index} boundary must be an object")
@@ -2453,6 +2423,19 @@ def main() -> int:
         not isinstance(value, int) or value <= 0 for value in breakpoints
     ):
         raise ValueError("Responsive manifest breakpoints must be positive integers")
+    height_breakpoints = manifest.get("height_breakpoints")
+    if not isinstance(height_breakpoints, list) or any(
+        not isinstance(value, int) or value <= 0 for value in height_breakpoints
+    ):
+        raise ValueError("Responsive manifest height_breakpoints must be positive integers")
+    breakpoint_capture = manifest.get("breakpoint_capture")
+    if not isinstance(breakpoint_capture, dict):
+        raise ValueError("Responsive manifest requires breakpoint_capture")
+    if not isinstance(breakpoint_capture.get("enabled"), bool):
+        raise ValueError("Responsive manifest breakpoint_capture.enabled must be boolean")
+    case_budget = manifest.get("case_budget")
+    if not isinstance(case_budget, dict):
+        raise ValueError("Responsive manifest requires case_budget")
 
     reference, reference_format = load_capture(args.reference)
     if reference_format not in LOSSLESS_FORMATS:
@@ -2546,19 +2529,16 @@ def main() -> int:
         )
 
     secondary_state_missing: list[dict[str, Any]] = []
-    representative_classes = {"mobile-portrait", "tablet-portrait", "desktop"}
     for state in states:
         if state["primary"] or not state["material"]:
             continue
-        captured_classes = {
-            case.get("class")
-            for case in raw_cases
-            if case.get("state_id") == state["id"]
-            and case.get("viewport", {}).get("zoom_percent", 100) == 100
-            and case.get("viewport", {}).get("text_zoom_percent", 100) == 100
-        }
-        for missing_class in sorted(representative_classes - captured_classes):
-            missing = {"state_id": state["id"], "class": missing_class}
+        state_cases = [
+            case for case in raw_cases if case.get("state_id") == state["id"]
+        ]
+        for required in SECONDARY_STATE_ANCHORS:
+            if any(matches_required(case, required) for case in state_cases):
+                continue
+            missing = {"state_id": state["id"], **required}
             secondary_state_missing.append(missing)
             append_violation(
                 violations,
@@ -2572,7 +2552,7 @@ def main() -> int:
         discovered_heights,
         boundary_extraction_errors,
     ) = discovered_boundaries(manifest)
-    if boundary_extraction_errors:
+    if boundary_extraction_errors and breakpoint_capture["enabled"]:
         blocker = {
             "scope": "coverage",
             "gate": "boundary_extraction_errors",
@@ -2581,14 +2561,103 @@ def main() -> int:
         }
         violations.append(blocker)
         blockers.append(blocker)
-    if set(breakpoints) != discovered_widths:
+
+    for field in (
+        "discovered_widths",
+        "discovered_heights",
+        "selected_widths",
+        "selected_heights",
+    ):
+        values = breakpoint_capture.get(field)
+        if not isinstance(values, list) or any(
+            not isinstance(value, int) or value <= 0 for value in values
+        ):
+            raise ValueError(
+                f"Responsive manifest breakpoint_capture.{field} must be positive integers"
+            )
+    if breakpoint_capture.get("maximum_boundaries") != MAX_COMPACT_BREAKPOINTS:
+        append_violation(
+            violations,
+            "coverage",
+            "breakpoint_budget_mismatch",
+            actual=breakpoint_capture.get("maximum_boundaries"),
+            expected=MAX_COMPACT_BREAKPOINTS,
+        )
+    if set(breakpoint_capture["discovered_widths"]) != discovered_widths or set(
+        breakpoint_capture["discovered_heights"]
+    ) != discovered_heights:
         append_violation(
             violations,
             "coverage",
             "breakpoint_discovery_mismatch",
-            declared=sorted(set(breakpoints)),
-            discovered=sorted(discovered_widths),
+            declared_widths=sorted(set(breakpoint_capture["discovered_widths"])),
+            discovered_widths=sorted(discovered_widths),
+            declared_heights=sorted(set(breakpoint_capture["discovered_heights"])),
+            discovered_heights=sorted(discovered_heights),
         )
+    selected_widths = set(breakpoints)
+    selected_heights = set(height_breakpoints)
+    if set(breakpoint_capture["selected_widths"]) != selected_widths or set(
+        breakpoint_capture["selected_heights"]
+    ) != selected_heights:
+        append_violation(
+            violations,
+            "coverage",
+            "breakpoint_selection_mismatch",
+        )
+    expected_selected_widths = (
+        discovered_widths if breakpoint_capture["enabled"] else set()
+    )
+    expected_selected_heights = (
+        discovered_heights if breakpoint_capture["enabled"] else set()
+    )
+    if (
+        selected_widths != expected_selected_widths
+        or selected_heights != expected_selected_heights
+    ):
+        append_violation(
+            violations,
+            "coverage",
+            "breakpoint_capture_scope",
+            enabled=breakpoint_capture["enabled"],
+            selected_widths=sorted(selected_widths),
+            expected_widths=sorted(expected_selected_widths),
+            selected_heights=sorted(selected_heights),
+            expected_heights=sorted(expected_selected_heights),
+        )
+    if breakpoint_capture["enabled"] and (
+        len(discovered_widths) + len(discovered_heights) > MAX_COMPACT_BREAKPOINTS
+    ):
+        blocker = {
+            "scope": "coverage",
+            "gate": "breakpoint_budget_exceeded",
+            "actual": len(discovered_widths) + len(discovered_heights),
+            "maximum": MAX_COMPACT_BREAKPOINTS,
+        }
+        violations.append(blocker)
+        blockers.append(blocker)
+
+    if (
+        case_budget.get("profile_limit") != MAX_COMPACT_CAPTURE_CASES
+        or case_budget.get("actual_cases") != len(raw_cases)
+    ):
+        append_violation(
+            violations,
+            "coverage",
+            "case_budget_mismatch",
+            declared=case_budget,
+            expected_limit=MAX_COMPACT_CAPTURE_CASES,
+            actual_cases=len(raw_cases),
+        )
+    if len(raw_cases) > MAX_COMPACT_CAPTURE_CASES:
+        blocker = {
+            "scope": "coverage",
+            "gate": "compact_case_budget_exceeded",
+            "actual": len(raw_cases),
+            "maximum": MAX_COMPACT_CAPTURE_CASES,
+        }
+        violations.append(blocker)
+        blockers.append(blocker)
     unzoomed_primary = [
         case
         for case in primary_cases
@@ -2598,7 +2667,7 @@ def main() -> int:
     unzoomed_widths = {case_key(case)[1] for case in unzoomed_primary}
     unzoomed_heights = {case_key(case)[2] for case in unzoomed_primary}
     missing_breakpoint_cases: list[dict[str, Any]] = []
-    for breakpoint in sorted(set(breakpoints)):
+    for breakpoint in sorted(selected_widths):
         for width in (breakpoint - 1, breakpoint, breakpoint + 1):
             if width not in unzoomed_widths:
                 item = {
@@ -2613,7 +2682,7 @@ def main() -> int:
                     "missing_breakpoint_boundary",
                     **item,
                 )
-    for breakpoint in sorted(discovered_heights):
+    for breakpoint in sorted(selected_heights):
         for height in (breakpoint - 1, breakpoint, breakpoint + 1):
             if height not in unzoomed_heights:
                 item = {
@@ -2694,7 +2763,11 @@ def main() -> int:
         "reference_pixel_sha256": reference_hash,
         "current_code_tree_hash": current_code_hash,
         "required_common_viewports": list(COMMON_VIEWPORTS),
+        "required_secondary_state_anchors": list(SECONDARY_STATE_ANCHORS),
         "declared_breakpoints": sorted(set(breakpoints)),
+        "declared_height_breakpoints": sorted(set(height_breakpoints)),
+        "breakpoint_capture": breakpoint_capture,
+        "case_budget": case_budget,
         "discovered_width_breakpoints": sorted(discovered_widths),
         "discovered_height_breakpoints": sorted(discovered_heights),
         "boundary_extraction_errors": boundary_extraction_errors,

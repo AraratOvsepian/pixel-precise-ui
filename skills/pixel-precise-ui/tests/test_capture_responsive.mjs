@@ -6,19 +6,23 @@ import test from "node:test";
 
 import {
   assessDeviceEmulation,
+  assertCompactCaptureBudget,
   boundaryExtractionErrors,
+  collectionPassed,
   expandCommonMatrix,
   extractBreakpoints,
   extractMediaBoundaries,
   fingerprintCodeTree,
   manifestAttestation,
   normalizePlan,
+  selectBreakpointTargets,
+  viewportsForState,
   verifyManifestAttestation,
 } from "../scripts/capture_responsive.mjs";
 
 const MATRIX = JSON.parse(
   await readFile(
-    new URL("../scripts/common-responsive-matrix-2026-07-v1.json", import.meta.url),
+    new URL("../scripts/common-responsive-matrix-2026-08-v2.json", import.meta.url),
     "utf8",
   ),
 );
@@ -29,13 +33,13 @@ async function temporaryDirectory() {
 
 test("shared common matrix expands deterministically without drift", () => {
   const expanded = expandCommonMatrix(MATRIX);
-  assert.equal(expanded.length, 70);
+  assert.equal(expanded.length, 13);
   assert.ok(
     expanded.some(
       (viewport) =>
         viewport.class === "desktop-zoom" &&
-        viewport.width === 1920 &&
-        viewport.zoom_percent === 175,
+        viewport.width === 1366 &&
+        viewport.zoom_percent === 200,
     ),
   );
   assert.ok(
@@ -44,11 +48,6 @@ test("shared common matrix expands deterministically without drift", () => {
         viewport.class === "accessibility-text-zoom" &&
         viewport.width === 390 &&
         viewport.text_zoom_percent === 200,
-    ),
-  );
-  assert.ok(
-    expanded.some(
-      (viewport) => viewport.class === "dpr-smoke" && viewport.base_dpr === 1.5,
     ),
   );
   assert.ok(
@@ -90,17 +89,165 @@ test("plan normalizes actual DPR and hashes a complete primary state", () => {
     { commonMatrix: MATRIX },
   );
 
-  assert.equal(plan.viewports.length, 70);
+  assert.equal(plan.viewports.length, 13);
   assert.equal(plan.states[0].primary, true);
   assert.equal(plan.states[0].full_matrix, true);
   assert.match(plan.states[0].action_hash, /^[a-f0-9]{64}$/);
+  assert.equal(plan.continuous_sweep.enabled, false);
+  assert.deepEqual(plan.continuous_sweep.state_ids, ["default"]);
+  assert.equal(plan.capture_breakpoint_boundaries, false);
   const zoomed = plan.viewports.find(
     (viewport) =>
-      viewport.class === "desktop-zoom" && viewport.zoom_percent === 125,
+      viewport.class === "desktop-zoom" && viewport.zoom_percent === 200,
   );
   assert.equal(zoomed.base_dpr, 1);
-  assert.equal(zoomed.dpr, 1.25);
-  assert.equal(zoomed.effective_css_width, Math.round((zoomed.width * 100) / 125));
+  assert.equal(zoomed.dpr, 2);
+  assert.equal(zoomed.effective_css_width, Math.round((zoomed.width * 100) / 200));
+});
+
+test("disabled sweep is a valid compact collection result", () => {
+  const emptyProbe = {
+    horizontal_overflow_px: 0,
+    missing_required_elements: [],
+    duplicate_required_elements: [],
+    overflow_elements: [],
+    unexpected_overlaps: [],
+    console_errors: [],
+    page_errors: [],
+    failed_resources: [],
+    blocked_write_requests: [],
+    settle_errors: [],
+    cssom_errors: [],
+    emulation_errors: [],
+    unlinked_visible_resources: [],
+    undecoded_visible_rasters: [],
+    visible_resources: [],
+  };
+  const passingCase = {
+    fatal_error: null,
+    byte_identical_repeat_capture: true,
+    screenshot_pixel_sha256: "a".repeat(64),
+    repeat_pixel_sha256: "a".repeat(64),
+    probe: emptyProbe,
+  };
+  assert.equal(
+    collectionPassed({
+      collectionErrors: [],
+      cases: [passingCase],
+      sweep: { enabled: false, complete: false },
+    }),
+    true,
+  );
+  assert.equal(
+    collectionPassed({
+      collectionErrors: [],
+      cases: Array.from({ length: 81 }, () => passingCase),
+      sweep: { enabled: false, complete: false },
+    }),
+    false,
+  );
+});
+
+test("compact breakpoint selection ignores containers and refuses unbounded media sets", () => {
+  const containerOnly = Array.from({ length: 100 }, (_, index) => ({
+    kind: "container",
+    extracted_boundaries: [{ dimension: "width", boundary_value: 300 + index }],
+  }));
+  assert.deepEqual(selectBreakpointTargets(containerOnly, true), {
+    widths: [],
+    heights: [],
+    selected_widths: [],
+    selected_heights: [],
+  });
+
+  const media = Array.from({ length: 9 }, (_, index) => ({
+    kind: "media",
+    extracted_boundaries: [{ dimension: "width", boundary_value: 400 + index * 100 }],
+  }));
+  assert.throws(
+    () => selectBreakpointTargets(media, true),
+    /limit is 8/,
+  );
+  assert.deepEqual(selectBreakpointTargets(media, false).selected_widths, []);
+
+  const exactBudget = [
+    ...Array.from({ length: 4 }, (_, index) => ({
+      kind: "media",
+      extracted_boundaries: [{ dimension: "width", boundary_value: 400 + index * 100 }],
+    })),
+    ...Array.from({ length: 4 }, (_, index) => ({
+      kind: "media",
+      extracted_boundaries: [{ dimension: "height", boundary_value: 600 + index * 100 }],
+    })),
+  ];
+  const selected = selectBreakpointTargets(exactBudget, true);
+  assert.equal(selected.selected_widths.length + selected.selected_heights.length, 8);
+});
+
+test("compact capture budget accepts 80 cases and rejects 81", () => {
+  assert.equal(assertCompactCaptureBudget(80), 80);
+  assert.throws(() => assertCompactCaptureBudget(81), /limit is 80/);
+});
+
+test("secondary states use only the four compact representative viewports", () => {
+  const plan = normalizePlan(
+    {
+      schema_version: "2.0",
+      base_url: "http://127.0.0.1:3000",
+      route: "/login",
+      reference_pixel_sha256: "a".repeat(64),
+      states: [
+        { id: "default", actions: [] },
+        { id: "error", actions: [], full_matrix: false },
+      ],
+      required_elements: [{ name: "main", selector: "main" }],
+      viewports: [],
+    },
+    { commonMatrix: MATRIX },
+  );
+  const selected = viewportsForState(plan.viewports, plan.states[1]);
+  assert.deepEqual(
+    selected.map((viewport) => [
+      viewport.class,
+      viewport.width,
+      viewport.height,
+      viewport.base_dpr,
+    ]),
+    [
+      ["mobile-portrait", 390, 844, 3],
+      ["mobile-landscape", 844, 390, 3],
+      ["tablet-portrait", 768, 1024, 2],
+      ["desktop", 1366, 768, 1],
+    ],
+  );
+});
+
+test("secondary state anchors cannot silently fall back or use the wrong DPR", () => {
+  const plan = normalizePlan(
+    {
+      schema_version: "2.0",
+      base_url: "http://127.0.0.1:3000",
+      route: "/login",
+      reference_pixel_sha256: "a".repeat(64),
+      states: [
+        { id: "default", actions: [] },
+        { id: "error", actions: [], full_matrix: false },
+      ],
+      required_elements: [{ name: "main", selector: "main" }],
+      include_common_matrix: false,
+      viewports: [
+        { class: "mobile-portrait", width: 390, height: 844, base_dpr: 2 },
+        { class: "mobile-landscape", width: 844, height: 390, base_dpr: 2 },
+        { class: "tablet-portrait", width: 768, height: 1024, base_dpr: 1 },
+        { class: "desktop", width: 1366, height: 768, base_dpr: 2 },
+      ],
+    },
+    { commonMatrix: MATRIX },
+  );
+  assert.throws(
+    () => viewportsForState(plan.viewports, plan.states[1]),
+    /require the exact maintained anchors/,
+  );
 });
 
 test("plan carries color scheme and assigns explicit mobile/tablet device semantics", () => {

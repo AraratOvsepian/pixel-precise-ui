@@ -335,10 +335,12 @@ class ResponsiveAuditTests(unittest.TestCase):
         *,
         states: list[dict[str, object]] | None = None,
         breakpoints: list[int] | None = None,
+        height_breakpoints: list[int] | None = None,
         discovered_queries: list[dict[str, str]] | None = None,
         collector_harness: bool = True,
         code_hash: str | None = None,
         sweep_gap: int = 20,
+        sweep_enabled: bool = True,
         color_scheme: str = "light",
     ) -> Path:
         states = states or [
@@ -459,38 +461,61 @@ class ResponsiveAuditTests(unittest.TestCase):
         )
         primary_id = next(state["id"] for state in states if state["primary"])
         samples = []
-        for width in range(320, 2561, sweep_gap):
-            samples.append(
-                {
-                    "width": width,
-                    "height": 720,
-                    "state_id": primary_id,
-                    "horizontal_overflow_px": 0,
-                    "overflow_elements": [],
-                    "clipped_required_elements": [],
-                    "unexpected_overlaps": [],
-                    "missing_required_elements": [],
-                    "failed_resources": [],
-                    "console_errors": [],
-                    "settle_errors": [],
-                }
-            )
-        if samples[-1]["width"] != 2560:
-            samples.append({**samples[-1], "width": 2560})
+        if sweep_enabled:
+            for width in range(320, 2561, sweep_gap):
+                samples.append(
+                    {
+                        "width": width,
+                        "height": 720,
+                        "state_id": primary_id,
+                        "horizontal_overflow_px": 0,
+                        "overflow_elements": [],
+                        "clipped_required_elements": [],
+                        "unexpected_overlaps": [],
+                        "missing_required_elements": [],
+                        "failed_resources": [],
+                        "console_errors": [],
+                        "settle_errors": [],
+                    }
+                )
+            if samples[-1]["width"] != 2560:
+                samples.append({**samples[-1], "width": 2560})
+        query_evidence = discovered_queries or []
+        discovered_widths = sorted(
+            {
+                boundary["boundary_value"]
+                for query in query_evidence
+                if query.get("kind", "media") == "media"
+                for boundary in query.get("extracted_boundaries", [])
+                if boundary.get("dimension") == "width"
+            }
+        )
+        discovered_heights = sorted(
+            {
+                boundary["boundary_value"]
+                for query in query_evidence
+                if query.get("kind", "media") == "media"
+                for boundary in query.get("extracted_boundaries", [])
+                if boundary.get("dimension") == "height"
+            }
+        )
+        selected_widths = sorted(set(breakpoints or []))
+        selected_heights = sorted(set(height_breakpoints or []))
+        breakpoint_capture_enabled = bool(selected_widths or selected_heights)
         manifest = root / "responsive.json"
         payload = {
                     "schema_version": "2.0",
-                    "profile": "common-2026-07-v1",
+                    "profile": "common-2026-08-v2",
                     "route": "/login",
                     "collector": {
                         "name": "pixel-precise-ui-capture",
-                        "version": "2.0",
+                        "version": "2.1",
                         "harness_collected": collector_harness,
                         "script_sha256": RESPONSIVE_AUDIT.file_sha256(CAPTURE_SCRIPT),
-                        "common_matrix_path": "common-responsive-matrix-2026-07-v1.json",
+                        "common_matrix_path": "common-responsive-matrix-2026-08-v2.json",
                         "common_matrix_sha256": RESPONSIVE_AUDIT.file_sha256(
                             CAPTURE_SCRIPT.with_name(
-                                "common-responsive-matrix-2026-07-v1.json"
+                                "common-responsive-matrix-2026-08-v2.json"
                             )
                         ),
                         "trace_path": trace.name,
@@ -534,11 +559,30 @@ class ResponsiveAuditTests(unittest.TestCase):
                             "boundary_extraction_errors": [],
                             **query,
                         }
-                        for query in (discovered_queries or [])
+                        for query in query_evidence
                     ],
-                    "breakpoints": breakpoints or [],
-                    "sweep": {"harness_collected": True, "samples": samples},
+                    "breakpoints": selected_widths,
+                    "height_breakpoints": selected_heights,
+                    "breakpoint_capture": {
+                        "enabled": breakpoint_capture_enabled,
+                        "maximum_boundaries": 8,
+                        "discovered_widths": discovered_widths,
+                        "discovered_heights": discovered_heights,
+                        "selected_widths": selected_widths,
+                        "selected_heights": selected_heights,
+                    },
+                    "sweep": {
+                        "harness_collected": True,
+                        "enabled": sweep_enabled,
+                        "complete": sweep_enabled,
+                        "reason": None if sweep_enabled else "disabled-by-capture-config",
+                        "samples": samples,
+                    },
                     "cases": cases,
+                    "case_budget": {
+                        "profile_limit": 80,
+                        "actual_cases": len(cases),
+                    },
                     "collection_errors": [],
                     "collection_passed": True,
                 }
@@ -646,12 +690,34 @@ class ResponsiveAuditTests(unittest.TestCase):
             self.assertEqual(
                 metrics["validator"]["name"], "pixel-precise-ui-responsive-audit"
             )
-            self.assertEqual(metrics["validator"]["version"], "2.0")
+            self.assertEqual(metrics["validator"]["version"], "2.1")
             self.assertEqual(metrics["replay"]["schema_version"], "1.0")
             self.assertTrue(Path(metrics["replay"]["manifest"]).is_absolute())
             self.assertTrue(
                 all(case["device_emulation"]["audit_validated"] for case in metrics["cases"])
             )
+
+    def test_compact_profile_certifies_with_continuous_sweep_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            code_root, reference, trace = self.prepare_root(root)
+            cases = self.complete_cases(root, "run-compact-no-sweep")
+            manifest = self.write_manifest(
+                root,
+                code_root,
+                reference,
+                trace,
+                cases,
+                sweep_enabled=False,
+            )
+            result = self.run_audit(
+                root, manifest, self.write_safe_ledger(root), code_root, reference
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            metrics = self.load_metrics(root)
+            self.assertEqual(metrics["classification"], "responsive-certified")
+            self.assertFalse(metrics["sweep"]["enabled"])
+            self.assertEqual(metrics["sweep"]["samples"], [])
 
     def test_hand_authored_collector_claim_cannot_certify(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -881,16 +947,17 @@ class ResponsiveAuditTests(unittest.TestCase):
             missing = self.load_metrics(root)["missing_breakpoint_cases"]
             self.assertIn(701, {item["required_value"] for item in missing})
 
-    def test_unresolved_container_boundary_is_blocking(self) -> None:
+    def test_container_boundary_is_not_misclassified_as_viewport_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             code_root, reference, trace = self.prepare_root(root)
+            cases = self.complete_cases(root, "run-container-query")
             manifest = self.write_manifest(
                 root,
                 code_root,
                 reference,
                 trace,
-                [],
+                cases,
                 discovered_queries=[
                     {
                         "kind": "container",
@@ -909,13 +976,11 @@ class ResponsiveAuditTests(unittest.TestCase):
                 root, manifest, self.write_safe_ledger(root), code_root, reference
             )
 
-            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             metrics = self.load_metrics(root)
-            self.assertIn(
-                "boundary_extraction_errors",
-                [violation["gate"] for violation in metrics["violations"]],
-            )
-            self.assertEqual(metrics["classification"], "blocked")
+            self.assertEqual(metrics["discovered_width_breakpoints"], [])
+            self.assertEqual(metrics["missing_breakpoint_cases"], [])
+            self.assertEqual(metrics["classification"], "responsive-certified")
 
     def test_stale_code_tree_hash_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1162,7 +1227,7 @@ class ResponsiveAuditTests(unittest.TestCase):
                 [violation["gate"] for violation in self.load_metrics(root)["violations"]],
             )
 
-    def test_material_secondary_state_requires_mobile_tablet_and_desktop(self) -> None:
+    def test_material_secondary_state_requires_four_compact_anchors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             code_root, reference, trace = self.prepare_root(root)
@@ -1192,26 +1257,88 @@ class ResponsiveAuditTests(unittest.TestCase):
             missing = self.load_metrics(root)["missing_material_state_viewports"]
             self.assertEqual(
                 {item["class"] for item in missing},
-                {"mobile-portrait", "tablet-portrait", "desktop"},
+                {
+                    "mobile-portrait",
+                    "mobile-landscape",
+                    "tablet-portrait",
+                    "desktop",
+                },
             )
 
-    def test_current_common_statcounter_sizes_are_in_profile(self) -> None:
+    def test_material_secondary_state_requires_exact_anchor_dpr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            code_root, reference, trace = self.prepare_root(root)
+            states = [
+                {
+                    "id": "default",
+                    "material": True,
+                    "primary": True,
+                    "full_matrix": True,
+                    "action_hash": "a" * 64,
+                },
+                {
+                    "id": "error",
+                    "material": True,
+                    "primary": False,
+                    "full_matrix": False,
+                    "action_hash": "b" * 64,
+                },
+            ]
+            cases = self.complete_cases(root, "run-secondary-dpr")
+            for index, required in enumerate(
+                RESPONSIVE_AUDIT.SECONDARY_STATE_ANCHORS
+            ):
+                cases.append(
+                    self.make_case(
+                        root,
+                        "run-secondary-dpr",
+                        f"error-{index}",
+                        required["class"],
+                        required["width"],
+                        required["height"],
+                        required["zoom"],
+                        required.get("text_zoom", 100),
+                        1.5,
+                        state_id="error",
+                    )
+                )
+            manifest = self.write_manifest(
+                root, code_root, reference, trace, cases, states=states
+            )
+            result = self.run_audit(
+                root, manifest, self.write_safe_ledger(root), code_root, reference
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            missing = self.load_metrics(root)["missing_material_state_viewports"]
+            self.assertEqual(len(missing), 4)
+            self.assertEqual(
+                {item["base_dpr"] for item in missing},
+                {1, 2, 3},
+            )
+
+    def test_compact_common_sizes_are_in_profile(self) -> None:
         profile = {
             (entry["class"], entry["width"], entry["height"])
             for entry in RESPONSIVE_AUDIT.COMMON_VIEWPORTS
         }
         for expected in {
-            ("mobile-portrait", 360, 780),
-            ("mobile-portrait", 384, 832),
+            ("mobile-portrait", 360, 800),
             ("mobile-portrait", 393, 873),
+            ("mobile-portrait", 390, 844),
             ("mobile-portrait", 414, 896),
-            ("tablet-portrait", 601, 1007),
-            ("tablet-portrait", 800, 1280),
-            ("tablet-portrait", 810, 1080),
+            ("mobile-landscape", 844, 390),
+            ("tablet-portrait", 768, 1024),
             ("tablet-landscape", 1280, 800),
-            ("desktop", 1280, 1200),
+            ("desktop", 1280, 720),
+            ("desktop", 1366, 768),
+            ("desktop", 1536, 864),
+            ("desktop", 1920, 1080),
+            ("desktop-zoom", 1366, 768),
+            ("accessibility-text-zoom", 390, 844),
         }:
             self.assertIn(expected, profile)
+        self.assertEqual(len(RESPONSIVE_AUDIT.COMMON_VIEWPORTS), 13)
         mobile = [
             entry
             for entry in RESPONSIVE_AUDIT.COMMON_VIEWPORTS

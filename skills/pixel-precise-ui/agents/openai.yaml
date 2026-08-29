@@ -1,4 +1,4 @@
 interface:
   display_name: "Pixel Precise UI"
   short_description: "Recreate and certify reference UIs across common screens"
-  default_prompt: "Use $pixel-precise-ui to recreate this reference in the existing application, iterate against exact local evidence, and certify the final UI across the full desktop, tablet, mobile, zoom, state, breakpoint, and continuous-width matrix."
+  default_prompt: "Use $pixel-precise-ui to recreate this reference in the existing application, iterate against exact local evidence, and certify it across the compact common-screen matrix plus any explicitly enabled route breakpoints."

@@ -26,14 +26,22 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const SCHEMA_VERSION = "2.0";
 export const HARNESS_NAME = "pixel-precise-ui-capture";
-export const HARNESS_VERSION = "2.0";
-export const PROFILE_NAME = "common-2026-07-v1";
+export const HARNESS_VERSION = "2.1";
+export const PROFILE_NAME = "common-2026-08-v2";
 export const TREE_HASH_ALGORITHM = "recursive-tree-v2";
+export const MAX_COMPACT_BREAKPOINTS = 8;
+export const MAX_COMPACT_CAPTURE_CASES = 80;
+export const COMPACT_SECONDARY_ANCHORS = Object.freeze([
+  Object.freeze({ class: "mobile-portrait", width: 390, height: 844, base_dpr: 3 }),
+  Object.freeze({ class: "mobile-landscape", width: 844, height: 390, base_dpr: 3 }),
+  Object.freeze({ class: "tablet-portrait", width: 768, height: 1024, base_dpr: 2 }),
+  Object.freeze({ class: "desktop", width: 1366, height: 768, base_dpr: 1 }),
+]);
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const MATRIX_PATH = path.join(
   path.dirname(SCRIPT_PATH),
-  "common-responsive-matrix-2026-07-v1.json",
+  "common-responsive-matrix-2026-08-v2.json",
 );
 const TREE_MAGIC = Buffer.from("pixel-precise-ui:recursive-tree-v2\0", "utf8");
 const ATTESTATION_MAGIC = "pixel-precise-ui:capture-attestation-v2\0";
@@ -546,7 +554,8 @@ export function normalizePlan(raw, options = {}) {
   if (!sweepRaw || typeof sweepRaw !== "object" || Array.isArray(sweepRaw)) {
     throw new Error("continuous_sweep must be an object");
   }
-  const stateIds = sweepRaw.state_ids ?? states.map((state) => state.id);
+  const stateIds =
+    sweepRaw.state_ids ?? states.filter((state) => state.primary).map((state) => state.id);
   if (!Array.isArray(stateIds) || !stateIds.every((value) => typeof value === "string")) {
     throw new Error("continuous_sweep.state_ids must be an array of state ids");
   }
@@ -556,7 +565,7 @@ export function normalizePlan(raw, options = {}) {
     }
   }
   const continuousSweep = {
-    enabled: sweepRaw.enabled !== false,
+    enabled: sweepRaw.enabled === true,
     min_width: positiveInteger(sweepRaw.min_width ?? 320, "continuous_sweep.min_width"),
     max_width: positiveInteger(sweepRaw.max_width ?? 2560, "continuous_sweep.max_width"),
     height: positiveInteger(
@@ -619,7 +628,7 @@ export function normalizePlan(raw, options = {}) {
     viewports,
     required_elements: requiredElements,
     continuous_sweep: continuousSweep,
-    capture_breakpoint_boundaries: raw.capture_breakpoint_boundaries !== false,
+    capture_breakpoint_boundaries: raw.capture_breakpoint_boundaries === true,
     breakpoint_height: positiveInteger(
       raw.breakpoint_height ?? viewports[0].height,
       "breakpoint_height",
@@ -629,6 +638,88 @@ export function normalizePlan(raw, options = {}) {
       "breakpoint_width",
     ),
   };
+}
+
+export function viewportsForState(viewports, stateValue) {
+  if (stateValue.full_matrix) return viewports;
+
+  const selected = [];
+  const missing = [];
+  for (const target of COMPACT_SECONDARY_ANCHORS) {
+    const match = viewports.find(
+      (viewport) =>
+        viewport.class === target.class &&
+        viewport.width === target.width &&
+        viewport.height === target.height &&
+        viewport.base_dpr === target.base_dpr &&
+        viewport.zoom_percent === 100 &&
+        viewport.text_zoom_percent === 100,
+    );
+    if (match) selected.push(match);
+    else missing.push(`${target.class}:${target.width}x${target.height}@${target.base_dpr}x`);
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Secondary compact states require the exact maintained anchors: ${missing.join(", ")}. ` +
+        "Keep include_common_matrix enabled or declare the missing anchors exactly.",
+    );
+  }
+  return selected;
+}
+
+export function assertCompactCaptureBudget(caseCount) {
+  if (!Number.isInteger(caseCount) || caseCount < 0) {
+    throw new Error("Compact capture case count must be a non-negative integer");
+  }
+  if (caseCount > MAX_COMPACT_CAPTURE_CASES) {
+    throw new Error(
+      `Compact capture would create ${caseCount} cases; the limit is ` +
+        `${MAX_COMPACT_CAPTURE_CASES}. Reduce material states, disable breakpoint capture, ` +
+        "or perform a separately authorized exhaustive audit.",
+    );
+  }
+  return caseCount;
+}
+
+export function viewportMediaBoundaries(discoveredQueries) {
+  const mediaQueries = discoveredQueries.filter((query) => query.kind === "media");
+  const valuesFor = (dimension) =>
+    [...new Set(
+      mediaQueries.flatMap((query) =>
+        (query.extracted_boundaries ?? [])
+          .filter((item) => item.dimension === dimension)
+          .map((item) => item.boundary_value),
+      ),
+    )].sort((left, right) => left - right);
+  return { widths: valuesFor("width"), heights: valuesFor("height") };
+}
+
+export function selectBreakpointTargets(discoveredQueries, enabled) {
+  const discovered = viewportMediaBoundaries(discoveredQueries);
+  if (!enabled) return { ...discovered, selected_widths: [], selected_heights: [] };
+  const count = discovered.widths.length + discovered.heights.length;
+  if (count > MAX_COMPACT_BREAKPOINTS) {
+    throw new Error(
+      `Compact breakpoint capture found ${count} viewport-media boundaries; ` +
+        `the limit is ${MAX_COMPACT_BREAKPOINTS}. Keep breakpoint capture disabled ` +
+        "for the common-screen run or perform a separately authorized exhaustive audit.",
+    );
+  }
+  return {
+    ...discovered,
+    selected_widths: discovered.widths,
+    selected_heights: discovered.heights,
+  };
+}
+
+export function collectionPassed({ collectionErrors, cases, sweep }) {
+  return (
+    collectionErrors.length === 0 &&
+    cases.length > 0 &&
+    cases.length <= MAX_COMPACT_CAPTURE_CASES &&
+    cases.every(casePasses) &&
+    (sweep.enabled === false || sweep.complete === true)
+  );
 }
 
 function unitToPixels(value, unit) {
@@ -1799,7 +1890,7 @@ function linkVisibleResources(probe, ledger, networkResources) {
   probe.visible_resources.sort((left, right) => `${left.type}|${left.url}`.localeCompare(`${right.type}|${right.url}`));
 }
 
-function annotateConditionalQueries(probe) {
+function annotateConditionalQueries(probe, requireViewportBoundaries = false) {
   for (const conditional of probe.media_queries) {
     const boundaries = extractMediaBoundaries(conditional.query);
     const extractionErrors = boundaryExtractionErrors(
@@ -1808,6 +1899,7 @@ function annotateConditionalQueries(probe) {
     );
     conditional.extracted_boundaries = boundaries;
     conditional.boundary_extraction_errors = extractionErrors;
+    if ((conditional.kind ?? "media") !== "media" || !requireViewportBoundaries) continue;
     for (const error of extractionErrors) {
       probe.cssom_errors.push({
         source: conditional.source ?? "inline",
@@ -2054,7 +2146,7 @@ async function captureCase({
       })),
     );
     probe = await collectBrowserProbe(page, requiredForState, { decodeImages: true });
-    annotateConditionalQueries(probe);
+    annotateConditionalQueries(probe, plan.capture_breakpoint_boundaries);
     first = await page.screenshot({
       path: screenshotPath,
       type: "png",
@@ -2356,7 +2448,7 @@ async function collectSweep({ browser, plan, breakpoints, trace }) {
           element.states.includes(stateId),
         );
         const probe = await collectBrowserProbe(page, requiredForState, { decodeImages: false });
-        annotateConditionalQueries(probe);
+        annotateConditionalQueries(probe, plan.capture_breakpoint_boundaries);
         const signatureInput = {
           required_elements: probe.required_elements.map((element) => ({
             name: element.name,
@@ -2642,13 +2734,20 @@ export async function runCapture(options) {
   let browserVersion;
   let cases = [];
   let sweep;
+  let selectedBreakpoints = [];
+  let selectedHeightBreakpoints = [];
   const mediaAggregate = new Map();
   const collectionErrors = [];
   try {
     browserVersion = browser.version();
     let ordinal = 0;
+    const plannedStateCases = plan.states.reduce(
+      (total, stateValue) => total + viewportsForState(plan.viewports, stateValue).length,
+      0,
+    );
+    assertCompactCaptureBudget(plannedStateCases);
     for (const stateValue of plan.states) {
-      for (const viewport of plan.viewports) {
+      for (const viewport of viewportsForState(plan.viewports, stateValue)) {
         ordinal += 1;
         const caseValue = await captureCase({
           browser,
@@ -2668,41 +2767,54 @@ export async function runCapture(options) {
     let discoveredMediaQueries = [...mediaAggregate.values()].sort((left, right) =>
       `${left.source}|${left.query}`.localeCompare(`${right.source}|${right.query}`),
     );
-    let breakpoints = [...new Set(discoveredMediaQueries.flatMap((query) => query.extracted_boundaries.filter((item) => item.dimension === "width").map((item) => item.boundary_value)))].sort((left, right) => left - right);
-    let heightBreakpoints = [...new Set(discoveredMediaQueries.flatMap((query) => query.extracted_boundaries.filter((item) => item.dimension === "height").map((item) => item.boundary_value)))].sort((left, right) => left - right);
+    let breakpointSelection = selectBreakpointTargets(
+      discoveredMediaQueries,
+      plan.capture_breakpoint_boundaries,
+    );
+    selectedBreakpoints = breakpointSelection.selected_widths;
+    selectedHeightBreakpoints = breakpointSelection.selected_heights;
     if (plan.capture_breakpoint_boundaries) {
       const additional = boundaryViewports(
-        breakpoints,
-        heightBreakpoints,
+        selectedBreakpoints,
+        selectedHeightBreakpoints,
         plan.viewports,
         plan.breakpoint_width,
         plan.breakpoint_height,
       );
-      for (const stateValue of plan.states) {
-        for (const viewport of additional) {
-          ordinal += 1;
-          const caseValue = await captureCase({
-            browser,
-            plan,
-            viewport,
-            stateValue,
-            outputDir,
-            trace,
-            ledger,
-            caseOrdinal: ordinal,
-            runId,
-          });
-          cases.push(caseValue);
-          mergeMediaEvidence(mediaAggregate, caseValue);
-        }
+      assertCompactCaptureBudget(cases.length + additional.length);
+      const primaryState = plan.states.find((stateValue) => stateValue.primary);
+      for (const viewport of additional) {
+        ordinal += 1;
+        const caseValue = await captureCase({
+          browser,
+          plan,
+          viewport,
+          stateValue: primaryState,
+          outputDir,
+          trace,
+          ledger,
+          caseOrdinal: ordinal,
+          runId,
+        });
+        cases.push(caseValue);
+        mergeMediaEvidence(mediaAggregate, caseValue);
       }
       discoveredMediaQueries = [...mediaAggregate.values()].sort((left, right) =>
         `${left.source}|${left.query}`.localeCompare(`${right.source}|${right.query}`),
       );
-      breakpoints = [...new Set(discoveredMediaQueries.flatMap((query) => query.extracted_boundaries.filter((item) => item.dimension === "width").map((item) => item.boundary_value)))].sort((left, right) => left - right);
-      heightBreakpoints = [...new Set(discoveredMediaQueries.flatMap((query) => query.extracted_boundaries.filter((item) => item.dimension === "height").map((item) => item.boundary_value)))].sort((left, right) => left - right);
+      breakpointSelection = selectBreakpointTargets(discoveredMediaQueries, true);
+      if (
+        stableStringify(breakpointSelection.selected_widths) !==
+          stableStringify(selectedBreakpoints) ||
+        stableStringify(breakpointSelection.selected_heights) !==
+          stableStringify(selectedHeightBreakpoints)
+      ) {
+        throw new Error(
+          "Viewport breakpoint discovery changed during capture; rerun so every selected boundary is covered.",
+        );
+      }
     }
-    sweep = await collectSweep({ browser, plan, breakpoints, trace });
+    sweep = await collectSweep({ browser, plan, breakpoints: selectedBreakpoints, trace });
   } catch (error) {
     collectionErrors.push({ name: error.name, message: error.message, stack: error.stack ?? null });
     sweep = {
@@ -2745,7 +2857,9 @@ export async function runCapture(options) {
   const discoveredMediaQueries = [...mediaAggregate.values()].sort((left, right) =>
     `${left.source}|${left.query}`.localeCompare(`${right.source}|${right.query}`),
   );
-  const breakpoints = [...new Set(discoveredMediaQueries.flatMap((query) => query.extracted_boundaries.filter((item) => item.dimension === "width").map((item) => item.boundary_value)))].sort((left, right) => left - right);
+  const discoveredViewportBreakpoints = viewportMediaBoundaries(discoveredMediaQueries);
+  const breakpoints = selectedBreakpoints;
+  const heightBreakpoints = selectedHeightBreakpoints;
   const collector = {
     name: HARNESS_NAME,
     version: HARNESS_VERSION,
@@ -2796,15 +2910,23 @@ export async function runCapture(options) {
     states: manifestStates,
     discovered_media_queries: discoveredMediaQueries,
     breakpoints,
+    height_breakpoints: heightBreakpoints,
+    breakpoint_capture: {
+      enabled: plan.capture_breakpoint_boundaries,
+      maximum_boundaries: MAX_COMPACT_BREAKPOINTS,
+      discovered_widths: discoveredViewportBreakpoints.widths,
+      discovered_heights: discoveredViewportBreakpoints.heights,
+      selected_widths: breakpoints,
+      selected_heights: heightBreakpoints,
+    },
     sweep,
     cases,
+    case_budget: {
+      profile_limit: MAX_COMPACT_CAPTURE_CASES,
+      actual_cases: cases.length,
+    },
     collection_errors: collectionErrors,
-    collection_passed:
-      collectionErrors.length === 0 &&
-      cases.length > 0 &&
-      cases.every(casePasses) &&
-      sweep.enabled === true &&
-      sweep.complete === true,
+    collection_passed: collectionPassed({ collectionErrors, cases, sweep }),
   };
   const manifest = {
     ...manifestPayload,

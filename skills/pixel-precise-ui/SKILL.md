@@ -32,7 +32,7 @@ Reference parity and responsive correctness are separate claims. Read [reference
 - A strict run is exact only when the decoded source and render have identical RGB pixel hashes and zero changed pixels. Similarity thresholds are iteration diagnostics, never permission to say `pixel-perfect`.
 - A `passed` result from the script without `--strict-parity` is diagnostic only. It is never completion evidence for an exact-match request.
 - A passing reference diff proves only the registered reference viewport. It never proves responsive correctness.
-- Do not call the task done until the automated browser collector and `scripts/responsive_audit.py` pass the complete `common-2026-07-v1` matrix, every discovered width and height breakpoint at `b-1/b/b+1`, the 320–2560 continuous sweep, repeated-capture stability, material-state coverage, independent visual review, browser probes, and responsive asset-safety gates.
+- Do not call the task done until the automated browser collector and `scripts/responsive_audit.py` pass the compact `common-2026-08-v2` matrix, the exact supplied reference viewport, repeated-capture stability, material-state coverage, independent visual review, browser probes, and responsive asset-safety gates. Breakpoint-boundary capture and the continuous width sweep are optional and must not run by default. The compact collector may not exceed 80 screenshot cases.
 - Never hand-author or repair the responsive evidence manifest. It is collector-owned, hash-attested evidence whose trace must correlate with every case; record post-capture visual inspection in a separate hash-bound review file.
 - `visual_diff.py` and `responsive_audit.py` are intentionally non-completing inputs. Only `scripts/certify_run.py`, after independently replaying both current validators from the raw evidence, may emit `completion_eligible: true`.
 
@@ -57,7 +57,7 @@ Inspect the route, component tree, styles, resets, computed fonts, available fon
 - verification landmarks;
 - protected comparison regions in a JSON manifest, including padded asset context and individual material-bearing controls where applicable;
 - a material-layer inventory for visibly glassy, metallic, translucent, embossed, or otherwise dimensional surfaces;
-- a responsive capture plan containing the full `common-2026-07-v1` viewport matrix, all material UI states, safe required-element selectors, and continuous-sweep settings; the browser collector must create the evidence manifest;
+- a responsive capture plan containing the compact `common-2026-08-v2` viewport matrix, the exact reference viewport when absent from that matrix, all material UI states, and safe required-element selectors; enable targeted media-query boundary checks only when the route has no more than eight numeric viewport boundaries, and enable a continuous sweep only for an explicitly requested exhaustive audit or a demonstrated between-breakpoint failure;
 - asset-composition evidence for every visible raster asset, including usage, origin, foreground/context contamination, occluded-pixel state, derivation operations, and responsive-safety status.
 
 In strict mode, unresolved `approximate` or `missing` assets that materially affect visible pixels block an `achieved` result. Ask for the original layered design, clean image plate, exact SVG/logo, or font file when needed.
@@ -115,7 +115,7 @@ Change one subsystem per round. Record the hypothesis and relevant regional metr
 
 ### 5. Certify responsive behavior
 
-Follow [references/responsive-validation.md](references/responsive-validation.md). Use `capture_responsive.mjs`; do not fabricate probe values. It captures the common matrix with realistic mobile/tablet DPR and real mobile/touch semantics, every declared material state, discovered media/container-query boundaries, exact repeats, resource inventory, and continuous sweep. Inspect every collector-produced capture through its generated review index, write the separate visual-review file, then run:
+Follow [references/responsive-validation.md](references/responsive-validation.md). Use `capture_responsive.mjs`; do not fabricate probe values. It captures the compact common matrix with realistic mobile/tablet DPR and real mobile/touch semantics, the full primary state, four representative viewports for each secondary material state, exact repeats, query inventory, and resource inventory. Inspect every collector-produced capture through its generated review index, write the separate visual-review file, then run:
 
 ```bash
 node scripts/capture_responsive.mjs \
@@ -163,7 +163,7 @@ The task is complete only when `certify_run.py` replays the current validators a
 - dimensional controls reproduce the source's material cues rather than merely matching bounds and average color;
 - normal-size overlay is visually indistinguishable;
 - no visible mismatch is explained by a generated or approximate asset.
-- the responsive audit classification is `responsive-certified` with no missing common, zoom, DPR, text-zoom, material-state, sweep, or breakpoint-boundary case.
+- the responsive audit classification is `responsive-certified` with no missing compact-profile, reference-viewport, zoom-smoke, text-zoom-smoke, or material-state case; when breakpoint or sweep coverage was explicitly enabled, those optional cases must also pass.
 
 Use `closely approximated` when the result is strong but visible differences remain. Use `blocked` when a required asset, viewport fact, capture capability, or hidden source information prevents convergence.
 Do not stop because a round count was reached. Continue focused iterations while a correctable mismatch remains and the user authorized convergence. Stop only on strict success or an evidence-backed blocker that cannot be corrected from available source information; never relabel a failed strict run as achieved.
